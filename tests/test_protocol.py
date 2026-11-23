@@ -3,6 +3,7 @@
 import asyncio
 import secrets
 import unittest
+from dataclasses import replace
 
 from cryptography.exceptions import InvalidTag
 
@@ -47,6 +48,12 @@ class AudioSink:
 
     def remove(self, _public):
         pass
+
+    def discard_capture(self):
+        pass
+
+    def reset_playback(self):
+        self.frames.clear()
 
 
 class RoomTests(unittest.IsolatedAsyncioTestCase):
@@ -94,7 +101,9 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         await self.pair(first, second)
         first.text("Привет, Bob!")
         await self.wait_for(lambda: "chat" in second_events)
-        self.assertEqual(second_events["chat"], ("Alice", "Привет, Bob!"))
+        self.assertEqual(second_events["chat"], (
+            b64(first.identity.public), "Alice", host.group.text[0].key, "Привет, Bob!",
+        ))
         self.assertNotIn("chat", host_events)
         frame = b"\x99" * 640
         second.broadcast(VOICE, frame)
@@ -103,7 +112,42 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(host.audio.frames)
         await self.pair(host, first)
         host.text("С хостом тоже работает")
-        await self.wait_for(lambda: "chat" in first_events and first_events["chat"][0] == "Host")
+        await self.wait_for(lambda: "chat" in first_events and first_events["chat"][1] == "Host")
+
+    async def test_channel_and_profile_sync_with_separate_voice_channels(self):
+        host, host_events = self.room(True, "Host", DIRECT)
+        guest, guest_events = self.room(False, "Guest", DIRECT)
+        await self.webrtc_join(host, host_events, guest, guest_events)
+        self.assertEqual(guest.group, host.group)
+        await self.pair(host, guest)
+        guest.add_channel("voice", "Студия")
+        await self.wait_for(lambda: guest.group.voice[-1].name == "Студия")
+        self.assertEqual(guest.group, host.group)
+        host.add_channel("text", "проверка")
+        await self.wait_for(lambda: guest.group.text[-1].name == "проверка")
+        custom = replace(guest.profile, name="Луна", status="busy", banner_first="#663355")
+        guest.update_profile(custom)
+        key = guest.identity.public
+        await self.wait_for(lambda: host.profiles.get(key) == custom)
+        self.assertEqual(host_events["profile"], (b64(key), custom))
+        studio = guest.group.voice[-1].key
+        guest.move(studio)
+        await self.wait_for(lambda: host.locations[key] == studio)
+        frame = b"\x11" * 640
+        guest.broadcast(VOICE, frame)
+        host.broadcast(VOICE, frame)
+        await asyncio.sleep(.10)
+        self.assertFalse(host.audio.frames)
+        self.assertFalse(guest.audio.frames)
+        chat = guest.group.text[-1].key
+        guest.text("Сообщение в другой канал", chat)
+        await self.wait_for(lambda: "chat" in host_events)
+        self.assertEqual(host_events["chat"], (b64(key), "Луна", chat, "Сообщение в другой канал"))
+        host.move(studio)
+        await self.wait_for(lambda: guest.locations[host.identity.public] == studio)
+        guest.broadcast(VOICE, frame)
+        await self.wait_for(lambda: host.audio.frames)
+        self.assertEqual(host.audio.frames, [(key, frame)])
 
     async def test_socks_resolves_name_inside_proxy(self):
         host, host_events = self.room(True, "Host", PROXY)
@@ -152,7 +196,9 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
             await self.pair(host, guest)
             guest.text("Через SOCKS5")
             await self.wait_for(lambda: "chat" in host_events)
-            self.assertEqual(host_events["chat"], ("Guest", "Через SOCKS5"))
+            self.assertEqual(host_events["chat"], (
+                b64(guest.identity.public), "Guest", host.group.text[0].key, "Через SOCKS5",
+            ))
             self.assertEqual(proxy_requests, [domain.encode("ascii")])
             self.assertIsNone(host.pending)
         finally:

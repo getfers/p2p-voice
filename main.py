@@ -1,4 +1,4 @@
-"""Точка входа приложения и сетевой цикл в отдельном потоке Qt."""
+"""Приложение Qt и единый фоновый цикл для комнат и звука."""
 
 import asyncio
 import queue
@@ -13,7 +13,7 @@ from PyQt6.QtCore import QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 from audio import Audio, DEVICES_ERRORS, devices
-from crypto import b64
+from crypto import Identity, b64
 from network import VOICE, Room
 from ui import Window
 
@@ -26,12 +26,15 @@ def callsign():
 class SessionWorker(QThread):
     session_event = pyqtSignal(str, object)
 
-    def __init__(self, host, name, mode, identity, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.args = host, name, mode
-        self.identity = identity
         self.commands = queue.SimpleQueue()
         self.stopping = threading.Event()
+        self.room = None
+        self.signaling = None
+        self.ending = None
+        self.audio = None
+        self.first_identity = None
 
     def send(self, command, *args):
         if not self.stopping.is_set():
@@ -47,97 +50,157 @@ class SessionWorker(QThread):
                 data = (b64(public), speaking)
             self.session_event.emit(kind, data)
 
+    def room_event(self, kind, data):
+        if kind == "ended":
+            self.ending = data or ""
+        else:
+            if kind == "connected":
+                self.audio.session(self.room.identity.public)
+            self.emit(kind, data)
+
     def run(self):
         try:
             asyncio.run(self.serve())
         except Exception as error:
-            self.emit("ended", f"Сеанс завершён из-за ошибки ({type(error).__name__}).")
+            self.emit("fatal", f"Фоновый поток завершился с ошибкой ({type(error).__name__}).")
         finally:
-            self.identity.close()
             while not self.commands.empty():
                 self.commands.get_nowait()
 
-    async def signal(self, action, args):
+    async def signal(self, operation, action, args):
+        failed = False
         try:
             await action(*args)
         except InvalidTag:
             self.emit("error", "Не удалось расшифровать токен. Проверьте приглашение и ключ.")
+            failed = True
         except (ValueError, OSError, KeyError, TypeError, AssertionError) as error:
             message = str(error) if isinstance(error, ValueError) else ""
             self.emit("error", message or f"Не удалось установить соединение ({type(error).__name__}).")
+            failed = True
         except Exception as error:
             self.emit("error", f"Ошибка сигналинга ({type(error).__name__}).")
-        else:
-            return
+            failed = True
         finally:
             self.emit("busy", False)
-        if action.__name__ == "join":
-            self.emit("ended", None)
+        if failed and operation == "join":
+            self.ending = ""
+
+    def start_signal(self, command, args):
+        if self.signaling is not None and not self.signaling.done():
+            return
+        operations = {"invite": self.room.invite, "join": self.room.join, "answer": self.room.accept_answer}
+        self.emit("busy", True)
+        self.signaling = asyncio.create_task(self.signal(command, operations[command], args))
+
+    async def cancel_signal(self):
+        if self.signaling is not None:
+            self.signaling.cancel()
+            await asyncio.gather(self.signaling, return_exceptions=True)
+            self.signaling = None
+
+    async def end_room(self, status):
+        await self.cancel_signal()
+        if self.room is not None:
+            await self.room.close()
+            self.room = None
+            if not self.stopping.is_set():
+                self.audio.session(None)
+                self.emit("ended", status)
+        self.ending = None
+
+    async def dispatch(self, command, args):
+        if command == "audio":
+            self.audio.settings(*args)
+            return
+        if command == "device":
+            self.audio.change_device(*args)
+            return
+        if command in ("host", "join"):
+            if self.room is not None:
+                raise ValueError("Сначала выйдите из текущей комнаты.")
+            profile, mode, *options = args
+            host = command == "host"
+            group, voice = options if host else (None, None)
+            self.room = Room(host, profile.name, mode, self.room_event, self.audio, self.first_identity,
+                             group=group, voice=voice, profile=profile)
+            self.first_identity = None
+            if host:
+                self.audio.session(self.room.identity.public)
+                self.room.show_roster()
+            else:
+                self.start_signal("join", options)
+            return
+        if self.room is None:
+            return
+        if command == "leave":
+            await self.end_room("")
+        elif command == "cancel":
+            await self.cancel_signal()
+            await self.room.cancel_invite()
+            self.emit("busy", False)
+        elif command in ("invite", "answer"):
+            self.start_signal(command, args)
+        else:
+            handlers = {
+                "text": self.room.text, "sas": self.room.show_sas, "verify": self.room.verify,
+                "profile": self.room.update_profile, "move": self.room.move,
+                "channel": self.room.add_channel,
+            }
+            handlers[command](*args)
+
+    def send_voice(self, payload):
+        if self.room is not None:
+            self.room.broadcast(VOICE, payload)
 
     async def serve(self):
-        audio = Audio(self.emit)
-        room = Room(*self.args, self.emit, audio, self.identity)
-        operations = {"invite": room.invite, "join": room.join, "answer": room.accept_answer}
-        handlers = {
-            "text": room.text, "sas": room.show_sas, "verify": room.verify,
-            "audio": audio.settings, "device": audio.change_device,
-        }
-        signaling = None
+        self.audio = Audio(self.emit)
+        self.first_identity = Identity()
         try:
-            room.show_roster()
             try:
                 self.emit("devices", devices())
             except DEVICES_ERRORS:
                 self.emit("audio_error", "Не удалось получить список аудиоустройств.")
-            audio.start(room.identity.public)
             while not self.stopping.is_set():
                 for _ in range(32):
                     try:
                         command, args = self.commands.get_nowait()
                     except queue.Empty:
                         break
-                    if command == "cancel":
-                        if signaling is not None and not signaling.done():
-                            signaling.cancel()
-                            await asyncio.gather(signaling, return_exceptions=True)
-                        await room.cancel_invite()
-                        self.emit("busy", False)
-                    elif command in operations:
-                        if signaling is None or signaling.done():
-                            self.emit("busy", True)
-                            signaling = asyncio.create_task(self.signal(operations[command], args))
-                    else:
-                        try:
-                            handlers[command](*args)
-                        except (ValueError, OSError) as error:
-                            self.emit("error", str(error))
-                    del args
-                await room.tick()
-                audio.capture(lambda data: room.broadcast(VOICE, data))
-                audio.tick()
-                await asyncio.sleep(0.008)
+                    try:
+                        await self.dispatch(command, args)
+                    except (ValueError, OSError) as error:
+                        self.emit("error", str(error))
+                    finally:
+                        del args
+                if self.room is not None:
+                    await self.room.tick()
+                if self.ending is not None:
+                    await self.end_room(self.ending)
+                self.audio.capture(self.send_voice)
+                self.audio.tick()
+                await asyncio.sleep(.006)
         finally:
-            if signaling is not None:
-                signaling.cancel()
-                await asyncio.gather(signaling, return_exceptions=True)
-            audio.close()
-            await room.close()
+            if self.first_identity is not None:
+                self.first_identity.close()
+            self.audio.close()
+            await self.end_room("")
 
 
 def main():
     smoke = "--self-test" in sys.argv
     app = QApplication([sys.argv[0], "-platform", "offscreen"] if smoke else sys.argv)
     app.setApplicationName("Эфир")
-    window = Window(callsign(), SessionWorker)
+    window = Window(callsign(), SessionWorker, ephemeral=smoke)
     window.show()
     if smoke:
-        window.host()
+        window.host_room(invite=False)
         ready = False
         timer = QTimer(window)
 
         def check_room():
             nonlocal ready
-            if window.panel is not None and window.panel.rows:
+            if window.members:
                 ready = True
                 timer.stop()
                 window.close()

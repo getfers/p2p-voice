@@ -16,6 +16,7 @@ from crypto import (
     MAX_TOKEN, Identity, b64, json_bytes, new_invite_key, open_document, seal_document,
     unb64, wipe,
 )
+from models import Group, ID_BYTES, MAX_PROFILE, Profile, read_id
 
 
 STUN = "stun"
@@ -29,9 +30,10 @@ MAX_FRAME = MAX_TOKEN + 1
 CONTROL, VOICE = 0, 1
 ROSTER, PAYLOAD = b"R", b"P"
 COMMIT, REVEAL, CONFIRM, TEXT = b"B", b"N", b"V", b"M"
+PROFILE, MOVE, ADD_CHANNEL = b"U", b"J", b"Q"
 VOICE_BYTES = 640
 CHAT_BYTES = 4096
-DATA_ERRORS = (ValueError, TypeError, KeyError, OverflowError, InvalidTag)
+DATA_ERRORS = (ValueError, TypeError, KeyError, OverflowError, RecursionError, InvalidTag)
 
 
 def endpoint(value, numeric=False):
@@ -136,6 +138,7 @@ class Invitation:
     token: str
     key: bytearray
     expires: int
+    voice: str
     link: object = None
 
     def clear(self):
@@ -152,6 +155,7 @@ class Link:
         self.channels = {}
         self.remote = None
         self.name = ""
+        self.entry_voice = None
         self.secure = None
         self.active = False
         self.closed = False
@@ -255,15 +259,23 @@ class Link:
 
 
 class Room:
-    def __init__(self, host, name, mode, emit, audio, identity=None):
+    def __init__(self, host, name, mode, emit, audio, identity=None, *, group=None,
+                 voice=None, profile=None):
         self.host = host
         self.name = name
         self.mode = mode
         self.emit = emit
         self.audio = audio
         self.identity = identity if identity is not None else Identity()
+        self.profile = profile or Profile(name)
         self.room_id = secrets.token_bytes(16) if host else None
         self.members = {self.identity.public: name}
+        self.group = (group or Group.create("Моя группа")) if host else None
+        self.voice = (voice or self.group.voice[0].key) if host else None
+        if host and not self.group.find("voice", self.voice):
+            raise ValueError("Голосовой канал больше недоступен.")
+        self.locations = {self.identity.public: self.voice}
+        self.profiles = {self.identity.public: self.profile}
         self.pairs = {}
         self.links = {}
         self.pending = None
@@ -301,10 +313,11 @@ class Room:
         if len(self.links) >= MAX_USERS - 1 or len(self.pairs) >= MAX_IDENTITIES:
             raise ValueError("Достигнут предел подключений для этой комнаты.")
         expires = int(time.time()) + INVITE_SECONDS
-        pending = self.pending = Invitation("", new_invite_key(), expires)
+        pending = self.pending = Invitation("", new_invite_key(), expires, self.voice)
         description = {
             "mode": self.mode, "expires": expires, "room": b64(self.room_id),
             "pub": b64(self.identity.public), "name": self.name,
+            "group": self.group.document(), "voice": pending.voice,
         }
         try:
             if self.mode == PROXY:
@@ -370,6 +383,11 @@ class Room:
                 raise ValueError("Срок действия приглашения истёк.")
             self.room_id = unb64(offer["room"], 16)
             remote, name = self.read_identity(offer)
+            self.group = Group.read(offer["group"])
+            self.voice = read_id(offer["voice"])
+            if not self.group.find("voice", self.voice):
+                raise ValueError("Приглашение содержит неизвестный голосовой канал.")
+            self.locations[self.identity.public] = self.voice
             answer = {"pub": b64(self.identity.public), "name": self.name}
             if self.mode == PROXY:
                 async with asyncio.timeout(15):
@@ -432,6 +450,7 @@ class Room:
         public, name = self.read_identity(answer)
         sdp = usable_sdp(answer["sdp"], self.mode)
         link = pending.link
+        link.entry_voice = pending.voice
         self.register(link, public, name, pending.key, pending.token, token)
         self.consume_invite()
         try:
@@ -464,6 +483,7 @@ class Room:
                     return
                 public, name = self.read_identity(answer)
                 link = Link(self)
+                link.entry_voice = pending.voice
                 self.register(link, public, name, pending.key, pending.token, token)
                 self.consume_invite()
                 link.begin_stream(reader, writer)
@@ -485,39 +505,65 @@ class Room:
     def link_ready(self, link):
         if self.host:
             self.members[link.remote] = link.name
+            self.locations[link.remote] = link.entry_voice
             self.publish_roster()
             self.emit("status", "Участник подключён.")
         elif self.mode != PROXY:
             self.emit("status", "Защищённый канал открыт. Ожидаем список участников.")
 
     def publish_roster(self):
-        roster = [{"pub": b64(public), "name": name} for public, name in self.members.items()]
+        roster = [
+            {"pub": b64(public), "name": name, "voice": self.locations[public]}
+            for public, name in self.members.items()
+        ]
+        packet = ROSTER + json_bytes({"group": self.group.document(), "members": roster})
         for link in self.links.values():
-            link.send(CONTROL, ROSTER + json_bytes(roster))
+            link.send(CONTROL, packet)
         self.begin_sas()
         self.show_roster()
 
     def show_roster(self):
         self.emit("members", [
             (b64(public), name, public == self.identity.public,
-             public in self.pairs and self.pairs[public].verified)
+             public in self.pairs and self.pairs[public].verified, self.locations.get(public))
             for public, name in self.members.items()
         ])
 
     def receive_roster(self, link, data):
-        roster = json.loads(data)
+        document = json.loads(data)
+        if not isinstance(document, dict):
+            return
+        group = Group.read(document["group"])
+        if (group.key != self.group.key or group.name != self.group.name
+                or not set(self.group.text) <= set(group.text)
+                or not set(self.group.voice) <= set(group.voice)):
+            return
+        roster = document["members"]
         if not isinstance(roster, list) or not 2 <= len(roster) <= MAX_USERS:
             return
-        members = dict(self.read_identity(member) for member in roster)
+        identities = [self.read_identity(member) for member in roster]
+        members = dict(identities)
         if (len(members) != len(roster) or members.get(link.remote) != link.name
                 or members.get(self.identity.public) != self.name):
+            return
+        locations = {public: read_id(member["voice"]) for (public, _), member in zip(identities, roster)}
+        if any(not group.find("voice", channel) for channel in locations.values()):
             return
         for public in members.keys() - {self.identity.public}:
             self.pair(public)
         for public in self.members.keys() - members.keys():
             self.audio.remove(public)
+            self.profiles.pop(public, None)
+        for public in (members.keys() & self.members.keys()) - {self.identity.public}:
+            if locations[public] != self.voice and self.locations.get(public) == self.voice:
+                self.audio.remove(public)
         connected = link.remote in self.members
+        if not connected or group != self.group:
+            self.group = group
+            self.emit("group", self.group)
         self.members = members
+        self.locations = locations
+        self.locations[self.identity.public] = self.voice
         self.begin_sas()
         self.show_roster()
         if not connected:
@@ -525,10 +571,25 @@ class Room:
             self.emit("status", "Вы в комнате. Сверьте коды участников.")
 
     def receive(self, link, channel, packet):
-        if channel == CONTROL and packet[:1] == ROSTER and not self.host and link is self.relay:
-            self.receive_roster(link, packet[1:])
-            return
-        limit = VOICE_BYTES if channel == VOICE else CHAT_BYTES + 1
+        if channel == CONTROL:
+            if packet[:1] == ROSTER and not self.host and link is self.relay:
+                self.receive_roster(link, packet[1:])
+                return
+            if self.host and link.remote in self.members:
+                if packet[:1] == MOVE:
+                    self.set_location(link.remote, read_id(packet[1:].decode("ascii")))
+                    return
+                if packet[:1] == ADD_CHANNEL and len(packet) <= 256:
+                    request = json.loads(packet[1:])
+                    try:
+                        self.add_channel(request["kind"], request["name"])
+                    except ValueError as error:
+                        link.send(CONTROL, b"E" + str(error).encode("utf-8"))
+                    return
+            elif packet[:1] == b"E" and link is self.relay and len(packet) <= 256:
+                self.emit("error", packet[1:].decode("utf-8"))
+                return
+        limit = VOICE_BYTES + ID_BYTES if channel == VOICE else MAX_PROFILE + 1
         if packet[:1] != PAYLOAD or not 89 < len(packet) <= 89 + limit:
             return
         sender, target = packet[1:33], packet[33:65]
@@ -536,12 +597,15 @@ class Room:
             return
         if self.host and sender != link.remote:
             return
+        if channel == VOICE and self.locations[sender] != self.locations[target]:
+            return
         if target == self.identity.public:
             peer = self.pairs[sender]
             data = peer.cipher.decrypt(channel, packet[65:], packet[:65])
             if channel == VOICE:
-                if peer.verified and len(data) == VOICE_BYTES:
-                    self.audio.incoming(sender, data)
+                if (peer.verified and len(data) == VOICE_BYTES + ID_BYTES
+                        and data[:ID_BYTES].hex() == self.voice):
+                    self.audio.incoming(sender, data[ID_BYTES:])
             else:
                 self.receive_control(sender, peer, data)
         elif self.host:
@@ -567,28 +631,89 @@ class Room:
             peer.remote_commit = body
             peer.reveal_sent = True
             self.send_to(sender, CONTROL, REVEAL + peer.nonce)
-        elif kind == REVEAL and len(body) == 32:
+        elif kind == REVEAL and len(body) == 32 and peer.sas is None:
             peer.reveal(body)
+            if peer.sas is not None:
+                self.emit("sas_code", (b64(sender), peer.sas))
         elif kind == CONFIRM and not body and peer.sas is not None:
+            was_verified = peer.verified
             peer.remote_confirmed = True
             self.show_roster()
-        elif kind == TEXT and body and peer.verified:
-            self.emit("chat", (self.members[sender], body.decode("utf-8")))
+            if peer.verified and not was_verified:
+                self.send_profile(sender)
+        elif kind == TEXT and peer.verified and ID_BYTES < len(body) <= ID_BYTES + CHAT_BYTES:
+            channel = body[:ID_BYTES].hex()
+            if self.group.find("text", channel):
+                self.emit_chat(sender, channel, body[ID_BYTES:].decode("utf-8"))
+        elif kind == PROFILE and peer.verified and len(body) <= MAX_PROFILE:
+            self.profiles[sender] = Profile.read(json.loads(body))
+            self.emit("profile", (b64(sender), self.profiles[sender]))
+
+    def send_profile(self, public):
+        self.send_to(public, CONTROL, PROFILE + json_bytes(self.profile.document()))
+
+    def update_profile(self, profile):
+        self.profile = profile
+        self.profiles[self.identity.public] = profile
+        self.broadcast(CONTROL, PROFILE + json_bytes(profile.document()))
+
+    def add_channel(self, kind, name):
+        candidate = self.group.add(kind, name)
+        if self.host:
+            self.group = candidate
+            self.emit("group", self.group)
+            self.publish_roster()
+        elif self.relay and self.relay.active and self.relay.remote in self.members:
+            self.relay.send(CONTROL, ADD_CHANNEL + json_bytes({"kind": kind, "name": name}))
+
+    def set_location(self, public, channel):
+        if not self.group.find("voice", channel) or self.locations[public] == channel:
+            return
+        self.locations[public] = channel
+        if public == self.identity.public:
+            self.voice = channel
+            self.audio.discard_capture()
+            self.audio.reset_playback()
+        else:
+            self.audio.remove(public)
+        if self.host:
+            self.publish_roster()
+        else:
+            self.relay.send(CONTROL, MOVE + channel.encode("ascii"))
+            self.show_roster()
+
+    def move(self, channel):
+        if self.host or (self.relay and self.relay.remote in self.members):
+            self.set_location(self.identity.public, channel)
 
     def broadcast(self, channel, payload):
         sender = self.identity.public
         for target in self.members.keys() - {sender}:
-            if self.pairs[target].verified:
+            if not self.pairs[target].verified:
+                continue
+            if channel == VOICE:
+                if self.locations[target] != self.voice:
+                    continue
+                self.send_to(target, channel, bytes.fromhex(self.voice) + payload)
+            else:
                 self.send_to(target, channel, payload)
 
-    def text(self, message):
+    def emit_chat(self, sender, channel, message):
+        profile = self.profiles.get(sender)
+        name = profile.name if profile else self.members[sender]
+        self.emit("chat", (b64(sender), name, channel, message))
+
+    def text(self, message, channel=None):
         payload = message.encode("utf-8")
         if not 1 <= len(payload) <= CHAT_BYTES:
             raise ValueError("Текст должен занимать до 4096 байт в UTF-8.")
         if not any(self.pairs[public].verified for public in self.members.keys() - {self.identity.public}):
             raise ValueError("Сначала подтвердите SAS с собеседником.")
-        self.broadcast(CONTROL, TEXT + payload)
-        self.emit("chat", (self.name, message))
+        channel = channel or self.group.text[0].key
+        if not self.group.find("text", channel):
+            raise ValueError("Текстовый канал больше недоступен.")
+        self.broadcast(CONTROL, TEXT + bytes.fromhex(channel) + payload)
+        self.emit_chat(self.identity.public, channel, message)
 
     def show_sas(self, key):
         public = unb64(key, 32)
@@ -607,7 +732,9 @@ class Room:
                 peer.confirmed = True
                 self.send_to(public, CONTROL, CONFIRM)
                 self.show_roster()
-                if not peer.verified:
+                if peer.verified:
+                    self.send_profile(public)
+                else:
                     self.emit("status", "Ожидаем, пока собеседник подтвердит SAS.")
 
     async def drop(self, link):
@@ -616,6 +743,8 @@ class Room:
         if self.links.get(link.remote) is link:
             del self.links[link.remote]
         was_member = self.members.pop(link.remote, None)
+        self.locations.pop(link.remote, None)
+        self.profiles.pop(link.remote, None)
         self.audio.remove(link.remote)
         await link.close()
         if self.host:
@@ -663,3 +792,6 @@ class Room:
             peer.close()
         self.pairs.clear()
         self.members.clear()
+        self.locations.clear()
+        self.profiles.clear()
+        self.profile = None

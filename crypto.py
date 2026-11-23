@@ -17,7 +17,8 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 
-PROTOCOL = b"p2p-voice/v1"
+PROTOCOL = b"p2p-voice/v2"
+TOKEN_VERSION = "2."
 MAX_TOKEN = 32768
 MAX_DOCUMENT = 49152
 REPLAY_WINDOW = 128
@@ -59,13 +60,15 @@ def seal_document(kind, document, key):
     context = PROTOCOL + b"/" + kind
     nonce = secrets.token_bytes(12)
     cipher = ChaCha20Poly1305(derive(key, None, b"token/" + kind))
-    return kind.decode("ascii") + "1." + b64(
+    return kind.decode("ascii") + TOKEN_VERSION + b64(
         nonce + cipher.encrypt(nonce, zlib.compress(json_bytes(document), 9), context)
     )
 
 
 def open_document(kind, token, key):
-    prefix = kind.decode("ascii") + "1."
+    prefix = kind.decode("ascii") + TOKEN_VERSION
+    if token.startswith(kind.decode("ascii") + "1."):
+        raise ValueError("Для приглашений нового формата обновите «Эфир» на обоих компьютерах.")
     if len(token) > MAX_TOKEN or not token.startswith(prefix):
         raise ValueError("Неверный тип или размер токена.")
     raw = unb64(token[len(prefix):])

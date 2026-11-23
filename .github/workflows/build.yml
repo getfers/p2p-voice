@@ -30,7 +30,7 @@ jobs:
         run: |
           $python = (Get-Command python).Source
           $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
-          & $python -m PyInstaller --noconfirm --clean --noupx --onefile --windowed --name Efir --collect-all av --recursive-copy-metadata aiortc --recursive-copy-metadata PyQt6 --recursive-copy-metadata sounddevice main.py
+          & $python -m PyInstaller --noconfirm --clean --noupx --onefile --windowed --name Efir --collect-all av --recursive-copy-metadata aiortc --recursive-copy-metadata PyQt6 --recursive-copy-metadata sounddevice --recursive-copy-metadata scipy main.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $exe = Resolve-Path dist/Efir.exe
           $process = Start-Process -FilePath $exe -ArgumentList '--self-test' -WindowStyle Hidden -Wait -PassThru
