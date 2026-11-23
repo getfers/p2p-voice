@@ -108,7 +108,7 @@ class Notifications:
         if len(body) > 145:
             body = body[:142].rstrip() + "…"
         if self.toast_enabled:
-            if self.window.isMinimized():
+            if self.window.isMinimized() or not self.window.isVisible():
                 self.pending = (heading, body)
             else:
                 self.toast.present(heading, body)
@@ -116,14 +116,14 @@ class Notifications:
         if self.sound_enabled and now - self.last_sound >= .55:
             self.sound.play()
             self.last_sound = now
-        if self.window.isMinimized() or not self.window.isActiveWindow():
+        if self.window.isMinimized() or not self.window.isVisible() or not self.window.isActiveWindow():
             QApplication.alert(self.window, 2800)
             if self.tray.isVisible() and QSystemTrayIcon.supportsMessages() and now - self.last_native >= .7:
                 self.tray.showMessage(APP_NAME, system_body, self.window.windowIcon(), 4000)
                 self.last_native = now
 
     def resume(self):
-        if self.pending is not None and not self.window.isMinimized():
+        if self.pending is not None and self.window.isVisible() and not self.window.isMinimized():
             self.toast.present(*self.pending)
             self.pending = None
 
@@ -131,6 +131,9 @@ class Notifications:
         self.sound_enabled = enabled
         if not enabled:
             self.sound.stop()
+
+    def set_volume(self, value):
+        self.sound.setVolume(value / 100)
 
     def set_toasts(self, enabled):
         self.toast_enabled = enabled

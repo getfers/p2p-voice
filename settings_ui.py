@@ -1,20 +1,24 @@
 """Полноразмерные настройки с навигацией внутри главного окна."""
 
 from PyQt6.QtCore import QSignalBlocker, Qt
-from PyQt6.QtWidgets import QButtonGroup, QComboBox, QFormLayout, QHBoxLayout, QSpinBox, QStackedWidget, QWidget
+from PyQt6.QtWidgets import (
+    QButtonGroup, QComboBox, QFormLayout, QHBoxLayout, QKeySequenceEdit, QSlider, QSpinBox, QStackedWidget, QWidget,
+)
 
-from audio import EFFECTS
+from audio import BUFFERS, EFFECTS
 from network import DIRECT, PROXY, STUN
 from screen_ui import video_choices
 from ui_dialogs import ProfileEditor, STRICT_HELP, STRICT_TITLE, STUN_HELP, field
+from ui_theme import ACCENTS, DENSITIES
 from ui_widgets import Meter, button, column, divider, label, panel, scroll_area, switch_row
+from voice_codec import BITRATES
 
 
 CATEGORIES = (
     ("profile", "Мой профиль", "edit"),
     ("voice", "Голос и видео", "mic"),
     ("network", "Сеть и инкогнито", "shield"),
-    ("appearance", "Внешний вид и уведомления", "sliders"),
+    ("appearance", "Интерфейс и система", "sliders"),
 )
 
 
@@ -27,6 +31,8 @@ class SettingsPage(QWidget):
         self.stack = QStackedWidget()
         self.buttons = {}
         self.pages = {}
+        self.page_layouts = {}
+        self.density = 1.0
         rail = self.rail = QWidget()
         rail.setObjectName("navigation")
         self.set_scale(window.ui_scale)
@@ -50,12 +56,23 @@ class SettingsPage(QWidget):
     def set_scale(self, scale):
         self.rail.setFixedWidth(round(264 * scale / 100))
 
+    def set_density(self, factor):
+        self.density = factor
+        for body, content in self.page_layouts.values():
+            self.style_density(body, content)
+
+    def style_density(self, body, content):
+        body.setContentsMargins(*(round(value * self.density) for value in (30, 26, 30, 30)))
+        body.setSpacing(round(17 * self.density))
+        content.setSpacing(round(14 * self.density))
+
     def start(self, key, focus=None):
         for page in self.pages.values():
             self.stack.removeWidget(page)
             page.deleteLater()
         self.device_lists = {}
         self.pages.clear()
+        self.page_layouts.clear()
         self.show_section(key)
         if key == "profile" and focus is not None:
             self.editor.focus_field(focus)
@@ -64,11 +81,11 @@ class SettingsPage(QWidget):
         if key not in self.pages:
             caption = next(name for name_key, name, _ in CATEGORIES if name_key == key)
             scroll, body = scroll_area()
-            body.setContentsMargins(30, 26, 30, 30)
-            body.setSpacing(17)
             contents = QWidget()
             contents.setMaximumWidth(735)
             content = column(contents, spacing=14)
+            self.page_layouts[key] = body, content
+            self.style_density(body, content)
             content.addWidget(label(caption, "channelTitle", True))
             body.addWidget(contents)
             body.addStretch()
@@ -98,15 +115,24 @@ class SettingsPage(QWidget):
             form.addRow(name, combo)
         self.update_devices()
         audio.addLayout(form)
+        self.ptt = switch_row(audio, "Push-to-Talk", window.ptt, window.set_ptt,
+                              detail="Голос идёт при удержании назначенной клавиши или кнопки «Говорить».")
         self.noise = switch_row(audio, "Шумоподавление", window.noise, window.set_noise,
-                                detail="Мягкий шумовой порог микрофона.")
-        self.ptt = switch_row(audio, "Push-to-Talk · F8", window.ptt, window.set_ptt)
+                                detail="Порог активации фильтрует звук тише выбранного уровня.")
+        for key, text, hint in (
+            ("aec", "Эхоподавление (AEC)", "Уменьшает эхо от динамиков по сигналу воспроизведения."),
+            ("agc", "Автоматическое усиление (AGC)", "Выровняет громкость голоса после срабатывания порога."),
+        ):
+            switch_row(audio, text, window.preferences[key],
+                       lambda value, setting=key: window.set_audio_option(setting, value), detail=hint)
         _, test = self.add_card(layout, "Проверка микрофона")
         self.probe = switch_row(test, "Измерять уровень", window.probe.isChecked(), window.set_probe)
         self.level = label("−∞ дБ", "meterLevel")
-        self.meter = Meter()
+        self.meter = Meter(window.preferences["threshold"] if window.noise else None)
         test.addWidget(self.meter)
         test.addWidget(self.level)
+        self.slider(test, "Порог активации", -75, -12, window.preferences["threshold"], " дБFS",
+                    lambda value: window.set_audio_option("threshold", value))
         self.loopback = switch_row(test, "Прослушать себя", window.loopback.isChecked(), window.set_loopback,
                                    detail="Звук с выбранным эффектом. Используйте наушники.")
         effects = QComboBox()
@@ -116,6 +142,17 @@ class SettingsPage(QWidget):
         effects.setCurrentIndex(effects.findData(window.voice_effect))
         effects.currentIndexChanged.connect(lambda _: window.set_effect(effects.currentData()))
         test.addWidget(effects)
+        _, transmission = self.add_card(layout, "Передача голоса")
+        form = QFormLayout()
+        self.choice(form, "Битрейт Opus", [(value, f"{value} кбит/с") for value in BITRATES],
+                    window.preferences["bitrate"], lambda value: window.set_audio_option("bitrate", value))
+        self.choice(form, "Буфер воспроизведения", BUFFERS, window.preferences["buffer"],
+                    lambda value: window.set_audio_option("buffer", value))
+        transmission.addLayout(form)
+        transmission.addWidget(label("Буфер компенсирует неравномерную доставку пакетов. При обрывах выберите стабильный режим.",
+                                     "muted", True))
+        self.slider(transmission, "Громкость звуков интерфейса", 0, 100, window.preferences["ui_volume"], "%",
+                    lambda value: window.set_notification_option("ui_volume", value))
         _, video = self.add_card(layout, "Качество демонстрации экрана")
         quality, fps = video_choices(window.screen_height, window.screen_fps)
         form = QFormLayout()
@@ -175,12 +212,68 @@ class SettingsPage(QWidget):
             scale.addItem(f"{value}%", value)
         scale.setCurrentIndex(scale.findData(window.ui_scale))
         scale.currentIndexChanged.connect(lambda _: window.set_scale(scale.currentData()))
-        form.addRow("Масштаб интерфейса", scale)
+        form.addRow("Масштаб шрифтов", scale)
+        self.choice(form, "Акцент", [(key, item[0]) for key, item in ACCENTS.items()], window.accent,
+                    lambda value: window.set_visual_option("accent", value))
+        self.choice(form, "Плотность", [(key, item[0]) for key, item in DENSITIES.items()], window.density,
+                    lambda value: window.set_visual_option("density", value))
         visuals.addLayout(form)
+        _, keys = self.add_card(layout, "Горячие клавиши")
+        key_form = QFormLayout()
+        key_notice = label("Срабатывают, когда активна комната sekret.", "muted", True)
+        for setting, title in (("ptt_key", "Push-to-Talk"), ("mic_key", "Микрофон"), ("sound_key", "Отключить звук")):
+            edit = QKeySequenceEdit(window.hotkeys[setting])
+            edit.setMaximumSequenceLength(1)
+            edit.setClearButtonEnabled(True)
+            edit.editingFinished.connect(lambda key=setting, widget=edit: self.save_hotkey(key, widget, key_notice))
+            key_form.addRow(title, edit)
+        keys.addLayout(key_form)
+        keys.addWidget(key_notice)
+        _, system = self.add_card(layout, "Работа приложения")
+        for setting, title, detail in (
+            ("tray_start", "Запускать свёрнутым в трей", "При наличии системного трея. Действует при следующем запуске."),
+            ("tray_close", "Сворачивать в трей при нажатии на крестик", "Для завершения нажмите «Выход» в меню трея."),
+            ("hardware", "Аппаратное ускорение анимаций", "OpenGL для баннеров и видеоплеера при наличии поддержки. После перезапуска."),
+        ):
+            switch_row(system, title, window.preferences[setting],
+                       lambda enabled, key=setting: window.preferences.set(key, enabled), detail=detail)
         _, notices = self.add_card(layout, "Уведомления")
-        switch_row(notices, "Звуки уведомлений", window.notifications.sound_enabled, window.notifications.set_sound)
+        switch_row(notices, "Звуки уведомлений", window.notifications.sound_enabled,
+                   lambda value: window.set_notification_option("notification_sound", value))
         switch_row(notices, "Всплывающие уведомления", window.notifications.toast_enabled,
-                   window.notifications.set_toasts, detail="Показывать сообщения и подключения внутри sekret.")
+                   lambda value: window.set_notification_option("toast", value),
+                   detail="Показывать сообщения и подключения внутри sekret.")
+
+    def save_hotkey(self, key, editor, notice):
+        if self.window.bind_hotkey(key, editor.keySequence()):
+            notice.setText("Срабатывают, когда активна комната sekret.")
+        else:
+            editor.setKeySequence(self.window.hotkeys[key])
+            notice.setText("Эта комбинация уже используется. Выберите другую.")
+
+    @staticmethod
+    def choice(form, title, items, selected, callback):
+        combo = QComboBox()
+        for value, caption in items:
+            combo.addItem(caption, value)
+        combo.setCurrentIndex(max(0, combo.findData(selected)))
+        combo.currentIndexChanged.connect(lambda _: callback(combo.currentData()))
+        form.addRow(title, combo)
+
+    @staticmethod
+    def slider(layout, title, low, high, value, suffix, callback):
+        row = QHBoxLayout()
+        row.addWidget(label(title, wrap=True))
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setAccessibleName(title)
+        slider.setRange(low, high)
+        slider.setValue(value)
+        caption = label(f"{value}{suffix}", "muted")
+        slider.valueChanged.connect(lambda level: caption.setText(f"{level}{suffix}"))
+        slider.valueChanged.connect(callback)
+        row.addWidget(slider, 1)
+        row.addWidget(caption)
+        layout.addLayout(row)
 
     def change_network(self, strict):
         self.window.choose_mode(self.route.currentData() if strict else STUN)
@@ -217,7 +310,7 @@ class SettingsPage(QWidget):
     def update_meter(self, value):
         if "voice" in self.pages and self.stack.currentWidget() is self.pages["voice"]:
             self.meter.set_level(value)
-            self.level.setText("−∞ дБ" if value < -65 else f"{value:.0f} дБ")
+            self.level.setText("−∞ дБ" if value <= -89 else f"{value:.0f} дБ")
 
     @staticmethod
     def add_card(layout, title):

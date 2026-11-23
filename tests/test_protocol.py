@@ -8,12 +8,14 @@ from fractions import Fraction
 from unittest.mock import patch
 
 import av
+import numpy as np
 from cryptography.exceptions import InvalidTag
 
 from crypto import Identity, b64, new_invite_key, open_document, seal_document
 from ice import STUN_SERVERS
 from network import CONTROL, DIRECT, PROXY, STUN, VIDEO, VOICE, Room, read_invitation
 from screen_media import ScreenEncoder
+from voice_codec import MIX_SAMPLES, PCM_BYTES, OpusDecoder, OpusEncoder, is_opus
 
 
 class CryptoTests(unittest.TestCase):
@@ -119,6 +121,21 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: bool(first.audio.frames))
         self.assertEqual(first.audio.frames, [(second.identity.public, frame)])
         self.assertFalse(host.audio.frames)
+        first.audio.frames.clear()
+        encoder = OpusEncoder(64)
+        tone = (4600 * np.sin(np.arange(PCM_BYTES // 2) * .2)).astype("<i2").tobytes()
+        second.transmit_voice(tone, lambda pcm: encoder.encode(pcm, 0))
+        await self.wait_for(lambda: bool(first.audio.frames))
+        sender, packet = first.audio.frames.pop()
+        self.assertEqual(sender, second.identity.public)
+        self.assertTrue(is_opus(packet))
+        decoded = OpusDecoder().decode(packet)
+        self.assertEqual(decoded.shape, (MIX_SAMPLES,))
+        self.assertGreater(np.max(np.abs(decoded)), 1000)
+        second.opus_peers.discard(first.identity.public)
+        second.transmit_voice(tone, lambda _: self.fail("Legacy receiver must use PCM"))
+        await self.wait_for(lambda: bool(first.audio.frames))
+        self.assertEqual(first.audio.frames, [(sender, tone)])
         await self.wait_for(lambda: first_events.get("screen_access") and second_events.get("screen_access"))
         first.start_screen()
         encoder = ScreenEncoder(15)

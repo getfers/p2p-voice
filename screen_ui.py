@@ -5,8 +5,12 @@ from PyQt6.QtGui import QImage, QPainter
 from PyQt6.QtWidgets import QApplication, QComboBox, QDialog, QFormLayout, QHBoxLayout, QSlider, QWidget
 
 from screen_media import FPS, MAX_WIDTH, QUALITY
+from render_surface import AnimatedSurface, use_opengl
 from ui_chrome import AnimatedDialog
 from ui_widgets import Symbol, button, column, label
+
+
+LOCAL_SCREEN = "local-screen"
 
 
 def video_choices(height, fps):
@@ -102,13 +106,22 @@ class ScreenCanvas(QWidget):
         super().__init__()
         self.image = QImage()
         self.setMinimumHeight(100)
+        self.surface = AnimatedSurface(self, self.draw_frame) if use_opengl() else None
 
     def set_frame(self, image):
         self.image = image
-        self.update()
+        (self.surface or self).update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.surface is not None:
+            self.surface.setGeometry(self.rect())
 
     def paintEvent(self, _event):
-        painter = QPainter(self)
+        if self.surface is None:
+            self.draw_frame(QPainter(self))
+
+    def draw_frame(self, painter):
         painter.fillRect(self.rect(), Qt.GlobalColor.black)
         if not self.image.isNull():
             size = self.image.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
@@ -139,9 +152,11 @@ class ScreenViewer(QWidget):
         options.addWidget(label("Громкость голоса", "muted"))
         self.volume = QSlider(Qt.Orientation.Horizontal)
         self.volume.setAccessibleName("Громкость голоса демонстрирующего")
-        self.volume.setRange(0, 100)
+        self.volume.setRange(0, 200)
         self.volume.valueChanged.connect(self.set_volume)
         options.addWidget(self.volume, 1)
+        self.volume_caption = label("100%", "muted")
+        options.addWidget(self.volume_caption)
         self.expand = button(callback=self.toggle_fullscreen, icon_name="fullscreen", width=36)
         self.expand.setToolTip("На весь экран")
         self.expand.setAccessibleName("На весь экран")
@@ -151,10 +166,15 @@ class ScreenViewer(QWidget):
 
     def add_frame(self, public, name, width, height, pixels):
         image = QImage(pixels, width, height, width * 3, QImage.Format.Format_RGB888).copy()
+        self.add_image(public, name, image)
+
+    def add_image(self, public, name, image):
         self.frames[public] = image
         if self.source.findData(public) < 0:
             self.source.addItem(name, public)
             self.show()
+            if public == LOCAL_SCREEN:
+                self.source.setCurrentIndex(self.source.findData(public))
         if public == self.source.currentData():
             self.canvas.set_frame(image)
 
@@ -164,12 +184,20 @@ class ScreenViewer(QWidget):
         self.volume.blockSignals(True)
         self.volume.setValue(self.volumes.get(public, 100))
         self.volume.blockSignals(False)
+        self.volume.setEnabled(public not in (None, LOCAL_SCREEN))
+        self.volume_caption.setText(f"{self.volume.value()}%" if self.volume.isEnabled() else "—")
 
     def set_volume(self, value):
         public = self.source.currentData()
-        if public is not None:
+        if public not in (None, LOCAL_SCREEN):
             self.volumes[public] = value
+            self.volume_caption.setText(f"{value}%")
             self.change_volume(public, value)
+
+    def update_peer_volume(self, public, value):
+        self.volumes[public] = value
+        if self.source.currentData() == public:
+            self.selected(self.source.currentIndex())
 
     def end(self, public):
         self.frames.pop(public, None)
@@ -198,6 +226,7 @@ class ScreenViewer(QWidget):
         row = QHBoxLayout()
         row.addWidget(label("Громкость голоса", "muted"))
         row.addWidget(self.volume, 1)
+        row.addWidget(self.volume_caption)
         row.addWidget(button("Выйти из полноэкранного режима", dialog.reject, icon_name="fullscreen"))
         layout.addLayout(row)
         dialog.finished.connect(self.restore_canvas)
@@ -207,5 +236,7 @@ class ScreenViewer(QWidget):
         self.fullscreen = None
         self.viewer_layout.insertWidget(1, self.canvas, 1)
         self.viewer_layout.itemAt(2).layout().insertWidget(1, self.volume, 1)
+        self.viewer_layout.itemAt(2).layout().insertWidget(2, self.volume_caption)
         self.canvas.show()
         self.volume.show()
+        self.volume_caption.show()

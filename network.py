@@ -20,6 +20,7 @@ from crypto import (
 from ice import gathered_description
 from models import Group, ID_BYTES, MAX_PROFILE, Profile, read_id
 from screen_media import CHUNK, STREAM_ID, VIDEO_HEADER, ScreenReceiver, video_chunks
+from voice_codec import PCM_BYTES, is_opus
 
 
 STUN = "stun"
@@ -34,7 +35,6 @@ ROSTER, PAYLOAD = b"R", b"P"
 COMMIT, REVEAL, CONFIRM, TEXT = b"B", b"N", b"V", b"M"
 PROFILE, MOVE, ADD_CHANNEL = b"U", b"J", b"Q"
 SCREEN_START, SCREEN_STOP = b"S", b"X"
-VOICE_BYTES = 640
 CHAT_BYTES = 4096
 DATA_ERRORS = (ValueError, TypeError, KeyError, OverflowError, RecursionError, InvalidTag)
 
@@ -172,6 +172,7 @@ class Link:
         self.reader_task = None
         self.channels = {}
         self.remote = None
+        self.opus = False
         self.name = ""
         self.entry_voice = None
         self.secure = None
@@ -306,6 +307,7 @@ class Room:
         self.profile = profile or Profile(name)
         self.room_id = secrets.token_bytes(16) if host else None
         self.members = {self.identity.public: name}
+        self.opus_peers = {self.identity.public}
         self.group = (group or Group.create("Моя группа")) if host else None
         self.voice = (voice or self.group.voice[0].key) if host else None
         if host and not self.group.find("voice", self.voice):
@@ -371,6 +373,7 @@ class Room:
         pending = self.pending = Invitation("", new_invite_key(), expires, self.voice)
         description = {
             "mode": self.mode, "stun": self.mode == STUN, "expires": expires, "room": b64(self.room_id),
+            "opus": True,
             "pub": b64(self.identity.public), "name": self.name,
             "group": self.group.document(), "voice": pending.voice,
         }
@@ -441,7 +444,7 @@ class Room:
             if not self.group.find("voice", self.voice):
                 raise ValueError("Приглашение содержит неизвестный голосовой канал.")
             self.locations[self.identity.public] = self.voice
-            answer = {"pub": b64(self.identity.public), "name": self.name}
+            answer = {"pub": b64(self.identity.public), "name": self.name, "opus": True}
             if self.mode == PROXY:
                 async with asyncio.timeout(15):
                     reader, writer = await connect_socks(proxy, offer["address"])
@@ -451,6 +454,7 @@ class Room:
                     answer["challenge"] = b64(challenge)
                     sealed = seal_document(b"answer", answer, key)
                     link = Link(self)
+                    link.opus = offer.get("opus") is True
                     self.register(link, remote, name, key, token, sealed)
                     write_frame(writer, sealed.encode("ascii"))
                     await writer.drain()
@@ -458,6 +462,7 @@ class Room:
                     writer = None
             else:
                 link = self.new_webrtc(False)
+                link.opus = offer.get("opus") is True
                 self.relay = link
                 async with asyncio.timeout(20):
                     await link.pc.setRemoteDescription(
@@ -506,6 +511,7 @@ class Room:
         public, name = self.read_identity(answer)
         sdp = usable_sdp(answer["sdp"], self.mode)
         link = pending.link
+        link.opus = answer.get("opus") is True
         link.entry_voice = pending.voice
         self.register(link, public, name, pending.key, pending.token, token)
         self.consume_invite()
@@ -541,6 +547,7 @@ class Room:
                     return
                 public, name = self.read_identity(answer)
                 link = Link(self)
+                link.opus = answer.get("opus") is True
                 link.entry_voice = pending.voice
                 self.register(link, public, name, pending.key, pending.token, token)
                 self.consume_invite()
@@ -563,6 +570,8 @@ class Room:
     def link_ready(self, link):
         if self.host:
             self.members[link.remote] = link.name
+            if link.opus:
+                self.opus_peers.add(link.remote)
             self.locations[link.remote] = link.entry_voice
             self.publish_roster()
             self.emit("status", "Участник подключён.")
@@ -571,7 +580,7 @@ class Room:
 
     def publish_roster(self):
         roster = [
-            {"pub": b64(public), "name": name, "voice": self.locations[public]}
+            {"pub": b64(public), "name": name, "voice": self.locations[public], "opus": public in self.opus_peers}
             for public, name in self.members.items()
         ]
         packet = ROSTER + json_bytes({"group": self.group.document(), "members": roster})
@@ -622,6 +631,8 @@ class Room:
             self.group = group
             self.emit("group", self.group)
         self.members = members
+        self.opus_peers = {public for (public, _), entry in zip(identities, roster)
+                           if link.opus and entry.get("opus") is True}
         self.locations = locations
         self.locations[self.identity.public] = self.voice
         self.begin_sas()
@@ -649,7 +660,7 @@ class Room:
             elif packet[:1] == b"E" and link is self.relay and len(packet) <= 256:
                 self.emit("error", packet[1:].decode("utf-8"))
                 return
-        limit = {VOICE: VOICE_BYTES + ID_BYTES, VIDEO: ID_BYTES + VIDEO_HEADER.size + CHUNK,
+        limit = {VOICE: PCM_BYTES + ID_BYTES, VIDEO: ID_BYTES + VIDEO_HEADER.size + CHUNK,
                  CONTROL: MAX_PROFILE + 1}[channel]
         if packet[:1] != PAYLOAD or not 89 < len(packet) <= 89 + limit:
             return
@@ -664,9 +675,10 @@ class Room:
             peer = self.pairs[sender]
             data = peer.cipher.decrypt(channel, packet[65:], packet[:65])
             if channel == VOICE:
-                if (peer.verified and len(data) == VOICE_BYTES + ID_BYTES
-                        and data[:ID_BYTES].hex() == self.voice):
-                    self.audio.incoming(sender, data[ID_BYTES:])
+                if peer.verified and data[:ID_BYTES].hex() == self.voice:
+                    frame = data[ID_BYTES:]
+                    if len(frame) == PCM_BYTES or is_opus(frame):
+                        self.audio.incoming(sender, frame)
             elif channel == VIDEO:
                 if peer.verified and data[:ID_BYTES].hex() == self.voice:
                     self.receive_screen(sender, data[ID_BYTES:])
@@ -851,6 +863,17 @@ class Room:
             else:
                 self.send_to(target, channel, payload)
 
+    def transmit_voice(self, pcm, encode):
+        targets = [public for public, peer in self.pairs.items()
+                   if peer.verified and self.locations.get(public) == self.voice]
+        if not targets:
+            return
+        opus = encode(pcm) if any(public in self.opus_peers for public in targets) else None
+        prefix = bytes.fromhex(self.voice)
+        for public in targets:
+            frame = opus if opus and public in self.opus_peers else pcm
+            self.send_to(public, VOICE, prefix + frame)
+
     def emit_chat(self, sender, channel, message):
         profile = self.profiles.get(sender)
         name = profile.name if profile else self.members[sender]
@@ -896,6 +919,7 @@ class Room:
         if self.links.get(link.remote) is link:
             del self.links[link.remote]
         was_member = self.members.pop(link.remote, None)
+        self.opus_peers.discard(link.remote)
         self.locations.pop(link.remote, None)
         self.profiles.pop(link.remote, None)
         self.audio.remove(link.remote)
@@ -954,6 +978,7 @@ class Room:
             peer.close()
         self.pairs.clear()
         self.members.clear()
+        self.opus_peers.clear()
         self.locations.clear()
         self.profiles.clear()
         self.screen_receivers.clear()

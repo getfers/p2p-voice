@@ -8,8 +8,9 @@ from html import escape
 from PyQt6.QtCore import QEvent, QSize, QSignalBlocker, QTimer, Qt
 from PyQt6.QtGui import QFont, QIcon, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QDialog, QFrame,
-    QGridLayout, QHBoxLayout, QInputDialog, QMenu, QSizePolicy, QStackedWidget, QSystemTrayIcon, QWidget,
+    QApplication, QComboBox, QDialog, QFrame,
+    QGridLayout, QHBoxLayout, QInputDialog, QKeySequenceEdit, QLineEdit, QMenu, QSizePolicy, QSlider,
+    QStackedWidget, QSystemTrayIcon, QWidget,
 )
 
 from audio import EFFECTS
@@ -17,11 +18,12 @@ from branding import APP_ICON, APP_NAME
 from models import Group, Profile
 from network import DIRECT, PROXY, STUN
 from notifications import Notifications
-from screen_ui import ScreenCapture, ScreenViewer, ShareDialog
+from preferences import Preferences
+from screen_ui import LOCAL_SCREEN, ScreenCapture, ScreenViewer, ShareDialog
 from settings_ui import SettingsPage
 from ui_chrome import AnimatedDialog, FramelessWindow, PaneTransition, Splitter, TitleBar
 from ui_dialogs import ExchangeDialog, NetworkOptions, ProfileStore, SasDialog, field, load_gif
-from ui_theme import active_palette, apply_palette
+from ui_theme import ACCENTS, DENSITIES, PALETTES, active_palette, apply_palette
 from ui_widgets import (
     AnimatedButton, Avatar, BrandLogo, Meter, ProfileHeader, Symbol, button, column,
     divider, label, panel, refresh, scroll_area, switch_row,
@@ -29,7 +31,6 @@ from ui_widgets import (
 
 
 MAX_MESSAGES = 200
-EFFECT_ICONS = ("wave", "radio", "robot", "bolt", "spark", "mask")
 MODE_HINT = {
     STUN: "STUN · поиск внешнего адреса",
     DIRECT: "Инкогнито · без STUN · прямой IP",
@@ -123,6 +124,8 @@ class MemberButton(QWidget):
 class Window(FramelessWindow):
     def __init__(self, name, worker_type, *, ephemeral=False):
         super().__init__()
+        self.preferences = Preferences(ephemeral)
+        QApplication.instance().setProperty("sekretHardware", self.preferences["hardware"])
         self.profile_store = ProfileStore(ephemeral)
         self.profile, self.amnesia = self.profile_store.load(Profile(name))
         self.gif_path = self.profile_store.gif_path
@@ -149,6 +152,8 @@ class Window(FramelessWindow):
         self.profiles = {}
         self.sas_codes = {}
         self.speaking = set()
+        self.peer_volumes = {}
+        self.inspector_volume = None
         self.inspect_peer = None
         self.inspector_open = True
         self.presence_rows = defaultdict(list)
@@ -157,20 +162,28 @@ class Window(FramelessWindow):
         self.rendered_channel = None
         self.devices = []
         self.audio_devices = {True: None, False: None}
-        self.ptt = self.keyboard = self.mouse = False
-        self.noise = True
+        self.keyboard = self.mouse = False
+        self.ptt_down_key = None
+        self.ptt = self.preferences["ptt"]
+        self.noise = self.preferences["noise"]
+        self.hotkeys = {key: QKeySequence.fromString(self.preferences[key], QKeySequence.SequenceFormat.PortableText)
+                        for key in ("ptt_key", "mic_key", "sound_key")}
+        self.device_status = {True: None, False: None}
         self.voice_effect = "normal"
-        self.effect_controls = {}
         self.screen_height, self.screen_fps = 720, 15
         self.screen_available = False
         self.screen_source = None
         self.screen_sharing = False
         self.previous_room_sizes = None
         self.closing = False
+        self.force_exit = False
         self.worker_done = False
         self.fade_done = False
-        self.theme = "light"
-        self.ui_scale = 100
+        self.theme = self.preferences["theme"] if self.preferences["theme"] in PALETTES else "light"
+        self.ui_scale = self.preferences["scale"] if 90 <= self.preferences["scale"] <= 125 else 100
+        self.density = self.preferences["density"] if self.preferences["density"] in DENSITIES else "normal"
+        self.accent = self.preferences["accent"] if self.preferences["accent"] in ACCENTS else "mono"
+        self.layout_metrics = {}
         self.compact_header = None
         self.compact_call = None
         self.stage_columns = 3
@@ -185,10 +198,13 @@ class Window(FramelessWindow):
         self.resize(1280, 800)
         self.setMinimumSize(960, 640)
         self.setFont(QFont("Segoe UI", 10))
-        apply_palette(self.theme, self)
+        apply_palette(self.theme, self, self.ui_scale, self.accent, self.density)
         self.build()
         self.setup_tray()
         self.notifications = Notifications(self, self.tray)
+        self.notifications.set_sound(self.preferences["notification_sound"])
+        self.notifications.set_toasts(self.preferences["toast"])
+        self.notifications.set_volume(self.preferences["ui_volume"])
         self.state_changed.connect(self.update_window_state)
         fullscreen = QShortcut(QKeySequence("F11"), self)
         fullscreen.activated.connect(self.toggle_fullscreen)
@@ -203,6 +219,9 @@ class Window(FramelessWindow):
         self.render_self()
         self.render_inspector()
         self.worker.start()
+        for key in ("ptt", "noise", "threshold", "bitrate", "buffer", "aec", "agc"):
+            self.set_audio(key, self.preferences[key])
+        self.adjust_density()
 
     def build(self):
         root = QWidget()
@@ -328,7 +347,7 @@ class Window(FramelessWindow):
         menu.addAction(f"Открыть {APP_NAME}", self.restore_window)
         menu.addAction("О программе", self.show_about)
         menu.addSeparator()
-        menu.addAction("Выход", self.close)
+        menu.addAction("Выход", self.exit_app)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.tray_activated)
         if QSystemTrayIcon.isSystemTrayAvailable():
@@ -344,6 +363,15 @@ class Window(FramelessWindow):
             self.show()
             self.raise_()
             self.activateWindow()
+            self.notifications.resume()
+
+    def show_startup(self):
+        if not (self.preferences["tray_start"] and self.tray.isVisible()):
+            self.show()
+
+    def exit_app(self):
+        self.force_exit = True
+        self.close()
 
     def show_about(self):
         self.restore_window()
@@ -376,16 +404,36 @@ class Window(FramelessWindow):
     def set_theme(self, name):
         if name != self.theme:
             self.theme = name
+            self.preferences.set("theme", name)
             self.apply_appearance()
 
     def set_scale(self, scale):
         if scale != self.ui_scale:
             self.ui_scale = scale
+            self.preferences.set("scale", scale)
             self.apply_appearance()
 
+    def set_visual_option(self, key, value):
+        setattr(self, key, value)
+        self.preferences.set(key, value)
+        self.apply_appearance()
+
+    def adjust_density(self):
+        factor = DENSITIES[self.density][1]
+        for layout in (self.workspace.layout(), self.navigation.layout(), self.inspector.layout()):
+            if layout not in self.layout_metrics:
+                spacing = layout.spacing()
+                margins = layout.contentsMargins()
+                self.layout_metrics[layout] = (spacing, (margins.left(), margins.top(), margins.right(), margins.bottom()))
+            spacing, margins = self.layout_metrics[layout]
+            layout.setSpacing(round(spacing * factor))
+            layout.setContentsMargins(*(round(margin * factor) for margin in margins))
+        self.settings.set_density(factor)
+
     def apply_appearance(self):
-        apply_palette(self.theme, self, self.ui_scale)
+        apply_palette(self.theme, self, self.ui_scale, self.accent, self.density)
         self.settings.set_scale(self.ui_scale)
+        self.adjust_density()
         for kind in (BrandLogo, AnimatedButton, Symbol):
             for widget in self.findChildren(kind):
                 widget.refresh_theme()
@@ -451,7 +499,7 @@ class Window(FramelessWindow):
         self.stage_grid.setSpacing(8)
         call_layout.addWidget(stage_view, 1)
         self.stage_view = stage_view
-        self.screen_viewer = ScreenViewer(lambda peer, level: self.send("volume", peer, level))
+        self.screen_viewer = ScreenViewer(self.set_peer_volume)
         call_layout.addWidget(self.screen_viewer, 4)
         self.call_controls = QGridLayout()
         self.call_controls.setSpacing(5)
@@ -460,7 +508,7 @@ class Window(FramelessWindow):
         self.sound = button("Звук", self.set_sound, icon_name="headphones", toggle=True)
         self.share = button("Демонстрация экрана", self.open_share, icon_name="screen")
         self.share.setObjectName("screenShare")
-        self.ptt_control = button("Говорить · F8", icon_name="wave")
+        self.ptt_control = button("Говорить", icon_name="wave")
         self.ptt_control.pressed.connect(lambda: self.set_pressed("mouse", True))
         self.ptt_control.released.connect(lambda: self.set_pressed("mouse", False))
         self.invite = button("Пригласить", self.open_invite)
@@ -470,6 +518,8 @@ class Window(FramelessWindow):
             control.setFixedHeight(33)
             control.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         call_layout.addLayout(self.call_controls)
+        self.call_audio_status = label("", "muted", True)
+        call_layout.addWidget(self.call_audio_status)
         self.room_split.addWidget(call)
         chat_frame, chat = panel("inset", margins=(17, 14, 17, 15), spacing=9)
         chat_header = horizontal()
@@ -572,24 +622,18 @@ class Window(FramelessWindow):
         self.db = label("−∞ дБ", "meterLevel")
         meter_row.addWidget(self.db)
         studio_layout.addLayout(meter_row)
-        self.meter = Meter()
+        self.meter = Meter(self.preferences["threshold"] if self.noise else None)
         studio_layout.addWidget(self.meter)
         self.loopback = button("Прослушать себя", self.set_loopback, icon_name="play", toggle=True)
         self.loopback.setObjectName("microphoneMonitor")
         self.loopback.setToolTip("Локальное прослушивание с выбранным эффектом. Используйте наушники.")
         studio_layout.addWidget(self.loopback)
         studio_layout.addWidget(label("ГОЛОСОВЫЕ ЭФФЕКТЫ", "section"))
-        effects = QGridLayout()
-        effects.setSpacing(5)
-        self.effects = QButtonGroup(self)
-        for i, ((effect, title), glyph) in enumerate(zip(EFFECTS, EFFECT_ICONS)):
-            control = button(title, lambda _checked, option=effect: self.set_effect(option),
-                             icon_name=glyph, toggle=True)
-            control.setChecked(i == 0)
-            self.effects.addButton(control)
-            self.effect_controls[effect] = control
-            effects.addWidget(control, i // 2, i % 2)
-        studio_layout.addLayout(effects)
+        self.effect_menu = QComboBox()
+        for effect, caption in EFFECTS:
+            self.effect_menu.addItem(caption, effect)
+        self.effect_menu.currentIndexChanged.connect(lambda _: self.set_effect(self.effect_menu.currentData()))
+        studio_layout.addWidget(self.effect_menu)
         layout.addWidget(studio)
         network, network_layout = panel(margins=(11, 11, 11, 11), spacing=7)
         network_title = horizontal()
@@ -850,6 +894,7 @@ class Window(FramelessWindow):
         self.close_profile.set_glyph("close" if self.inspector_open else "plus")
         self.close_profile.setToolTip("Свернуть карточку" if self.inspector_open else "Открыть карточку")
         clear(self.inspector_profile)
+        self.inspector_volume = None
         self.inspector_profile.addWidget(ProfileHeader(profile, edit=self.edit_profile if member is None else None,
                                                        gif=self.local_gif if member is None else b""))
         self.inspector_profile.addWidget(divider())
@@ -860,6 +905,18 @@ class Window(FramelessWindow):
         if member:
             row.addWidget(label("SAS", "secure" if member.verified else "muted"))
         self.inspector_profile.addLayout(row)
+        if member and not member.own:
+            volume = horizontal()
+            volume.addWidget(Symbol("headphones"))
+            self.inspector_volume = slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, 200)
+            slider.setAccessibleName("Громкость собеседника")
+            slider.setValue(self.peer_volumes.get(public, 100))
+            self.inspector_volume_label = label(f"{slider.value()}%", "muted")
+            slider.valueChanged.connect(lambda value, peer=public: self.set_peer_volume(peer, value))
+            volume.addWidget(slider, 1)
+            volume.addWidget(self.inspector_volume_label)
+            self.inspector_profile.addLayout(volume)
         self.update_sas()
 
     def update_sas(self):
@@ -886,8 +943,11 @@ class Window(FramelessWindow):
         self.join_control.setEnabled(not busy or self.connecting)
         self.mic.setEnabled(in_call)
         self.sound.setEnabled(in_call)
-        self.ptt_control.setEnabled(in_call and self.mic.isChecked())
-        self.ptt_control.setToolTip("Удерживайте кнопку или F8. Нажатие включает Push-to-Talk.")
+        self.ptt_control.setEnabled(in_call and self.mic.isChecked() and self.ptt)
+        key = self.hotkeys["ptt_key"].toString(QKeySequence.SequenceFormat.NativeText)
+        self.ptt_control.setText(f"Говорить · {key}" if self.ptt and key and len(key) <= 8 else "Говорить")
+        self.ptt_control.setToolTip(f"Удерживайте кнопку или {key}." if self.ptt and key else
+                                    "Удерживайте кнопку." if self.ptt else "Push-to-Talk выключен в настройках.")
         self.invite.setEnabled(in_call and self.hosting)
         self.leave.setEnabled(busy and not self.leaving)
         ready = any(member.verified for member in self.members.values())
@@ -910,6 +970,32 @@ class Window(FramelessWindow):
         refresh(self.net_status, "protected", protected)
         self.net_status.setText("E2EE защищено" if protected else "E2EE · ожидание")
         self.network_icon.set_tone("green" if protected else "muted")
+        self.update_audio_status(in_call)
+
+    def update_audio_status(self, active=None):
+        if active is None:
+            active = self.session_group is not None and not self.connecting and not self.leaving
+        if not active or not self.group_in_view():
+            status = ""
+        elif self.device_status[False] is False and not self.sound.isChecked():
+            status = "Выход звука недоступен. Выберите устройство в «Голос и видео»."
+        elif not self.mic.isChecked():
+            status = "Микрофон выключен. Нажмите «Микрофон», чтобы говорить."
+        elif self.device_status[True] is False:
+            status = "Микрофон недоступен. Выберите вход в «Голос и видео»."
+        elif not any(member.verified and member.voice == self.current_channel("voice").key
+                     for member in self.members.values()):
+            status = "Для голоса нужен проверенный собеседник в том же голосовом канале."
+        elif self.ptt and not (self.keyboard or self.mouse):
+            status = "Удерживайте кнопку «Говорить» или назначенную клавишу."
+        elif any(member.own and public in self.speaking for public, member in self.members.items()):
+            status = "Голос передаётся"
+        elif self.noise and not self.ptt:
+            status = f"Микрофон включён · порог {self.preferences['threshold']} дБFS"
+        else:
+            status = "Микрофон включён"
+        self.call_audio_status.setText(status)
+        self.call_audio_status.setVisible(bool(status))
 
     def add_message_row(self, message):
         row = QFrame()
@@ -1088,6 +1174,7 @@ class Window(FramelessWindow):
         self.set_audio("deafened", disabled)
         self.sound.setText("Звук выкл." if disabled else "Звук")
         self.sound.setToolTip("Включить звук комнаты" if disabled else "Отключить звук комнаты")
+        self.update_audio_status()
 
     def set_probe(self, enabled):
         self.probe.setChecked(enabled)
@@ -1112,9 +1199,10 @@ class Window(FramelessWindow):
         self.loopback.setToolTip("Прослушивание работает локально. Используйте наушники.")
 
     def set_effect(self, effect):
-        if effect != self.voice_effect and effect in self.effect_controls:
+        if effect != self.voice_effect and self.effect_menu.findData(effect) >= 0:
             self.voice_effect = effect
-            self.effect_controls[effect].setChecked(True)
+            with QSignalBlocker(self.effect_menu):
+                self.effect_menu.setCurrentIndex(self.effect_menu.findData(effect))
             if "voice" in self.settings.pages:
                 with QSignalBlocker(self.settings.effects):
                     self.settings.effects.setCurrentIndex(self.settings.effects.findData(effect))
@@ -1122,32 +1210,68 @@ class Window(FramelessWindow):
 
     def set_ptt(self, enabled):
         self.ptt = enabled
+        self.preferences.set("ptt", enabled)
         self.set_audio("ptt", enabled)
         if not enabled:
             self.release_ptt()
+        self.update_controls()
 
     def set_pressed(self, source, value):
         if value and not self.ptt_control.isEnabled():
             return
-        if value and not self.ptt:
-            self.set_ptt(True)
         setattr(self, source, value)
         self.set_audio("pressed", self.keyboard or self.mouse)
         if source == "keyboard":
             self.ptt_control.setDown(value)
+        self.update_audio_status()
 
     def release_ptt(self):
+        self.ptt_down_key = None
         if self.keyboard or self.mouse:
             self.keyboard = self.mouse = False
             self.ptt_control.setDown(False)
             self.set_audio("pressed", False)
+            self.update_audio_status()
 
     def audio_settings(self):
         self.open_settings("voice")
 
     def set_noise(self, enabled):
         self.noise = enabled
-        self.set_audio("noise", enabled)
+        self.set_audio_option("noise", enabled)
+
+    def set_audio_option(self, key, value):
+        self.preferences.set(key, value)
+        self.set_audio(key, value)
+        self.meter.set_threshold(self.preferences["threshold"] if self.noise else None)
+        if "voice" in self.settings.pages:
+            self.settings.meter.set_threshold(self.preferences["threshold"] if self.noise else None)
+        self.update_audio_status()
+
+    def set_notification_option(self, key, value):
+        self.preferences.set(key, value)
+        handlers = {"notification_sound": self.notifications.set_sound,
+                    "ui_volume": self.notifications.set_volume, "toast": self.notifications.set_toasts}
+        handlers[key](value)
+
+    def bind_hotkey(self, name, sequence):
+        if not sequence.isEmpty() and (sequence in (QKeySequence("F11"), QKeySequence("Escape")) or
+                                       any(key != name and value == sequence for key, value in self.hotkeys.items())):
+            return False
+        self.release_ptt()
+        self.hotkeys[name] = sequence
+        self.preferences.set(name, sequence.toString(QKeySequence.SequenceFormat.PortableText))
+        self.update_controls()
+        return True
+
+    def set_peer_volume(self, public, level):
+        self.peer_volumes[public] = level
+        self.screen_viewer.update_peer_volume(public, level)
+        if self.inspect_peer == public and self.inspector_volume is not None:
+            with QSignalBlocker(self.inspector_volume):
+                self.inspector_volume.setValue(level)
+            self.inspector_volume_label.setText(f"{level}%")
+        self.send("volume", public, level)
 
     def change_audio_device(self, capture, device):
         self.audio_devices[capture] = device
@@ -1187,22 +1311,34 @@ class Window(FramelessWindow):
         self.screen_capture.stop()
         self.screen_source = None
         self.screen_sharing = False
+        self.end_screen_view(LOCAL_SCREEN)
         self.update_screen_control()
         if message:
             self.set_notice(message)
 
     def deliver_screen(self, image):
         self.worker.screen_image(image)
+        if self.group_in_view() and self.screen_sharing:
+            first = self.prepare_screen_view()
+            self.screen_viewer.add_image(LOCAL_SCREEN, "Мой экран · предпросмотр", image)
+            self.resize_screen_view(first)
 
     def show_screen_frame(self, public, width, height, pixels):
         member = self.members.get(public)
         if member is None or member.voice != self.current_channel("voice").key or not self.group_in_view():
             return
+        first = self.prepare_screen_view()
+        profile = self.display_profile(public, member)
+        self.screen_viewer.add_frame(public, profile.name, width, height, pixels)
+        self.resize_screen_view(first)
+
+    def prepare_screen_view(self):
         first = not self.screen_viewer.frames
         if first:
             self.previous_room_sizes = self.room_split.sizes()
-        profile = self.display_profile(public, member)
-        self.screen_viewer.add_frame(public, profile.name, width, height, pixels)
+        return first
+
+    def resize_screen_view(self, first):
         if first:
             self.reflow_workspace()
             height = self.room_split.height() - self.room_split.handleWidth()
@@ -1247,6 +1383,7 @@ class Window(FramelessWindow):
         self.invitation, self.reply = ("", ""), ""
         self.signal_busy = False
         self.members.clear()
+        self.peer_volumes.clear()
         self.profiles.clear()
         self.sas_codes.clear()
         self.speaking.clear()
@@ -1295,6 +1432,9 @@ class Window(FramelessWindow):
                         self.notifications.publish(
                             "Участник подключился", member.name, "К комнате подключился участник.",
                         )
+                for public in old.keys() - self.members.keys():
+                    if not old[public].own:
+                        self.notifications.publish("Участник вышел", old[public].name, "Участник покинул комнату.")
             if self.session_group is not None:
                 local = next((member for member in self.members.values() if member.own), None)
                 if local and local.voice:
@@ -1326,6 +1466,8 @@ class Window(FramelessWindow):
                 self.speaking.discard(public)
             for row in (*self.presence_rows.get(public, ()), *self.call_rows.get(public, ())):
                 row.activity(speaking)
+            if public in self.members and self.members[public].own:
+                self.update_audio_status()
         elif kind == "chat":
             self.receive_chat(*data)
             public, name, _, message = data
@@ -1334,8 +1476,8 @@ class Window(FramelessWindow):
                 self.notifications.publish(f"{name} · новое сообщение", message, "Новое сообщение в комнате.")
         elif kind == "meter":
             self.meter.set_level(data)
-            self.db.setText("−∞ дБ" if data < -65 else f"{data:.0f} дБ")
-            refresh(self.db, "active", data >= -65)
+            self.db.setText("−∞ дБ" if data <= -89 else f"{data:.0f} дБ")
+            refresh(self.db, "active", data > -89)
             self.settings.update_meter(data)
         elif kind == "devices":
             self.devices = data
@@ -1357,8 +1499,12 @@ class Window(FramelessWindow):
                 self.show_screen_frame(*frame)
         elif kind == "screen_ended":
             self.end_screen_view(data)
-        elif kind == "device" and not data[1]:
-            self.set_notice("Микрофон недоступен. Проверьте устройство." if data[0] else "Устройство вывода недоступно.")
+        elif kind == "device":
+            capture, available = data
+            self.device_status[capture] = available
+            self.update_audio_status()
+            if not available:
+                self.set_notice("Микрофон недоступен. Проверьте устройство." if capture else "Устройство вывода недоступно.")
         elif kind in ("status", "error", "audio_error", "fatal"):
             self.set_notice(data)
             if self.signal_dialog is not None and kind == "error":
@@ -1396,8 +1542,8 @@ class Window(FramelessWindow):
             self.update_controls()
         elif kind == "ended":
             self.room_closed(data)
-            if data and self.isMinimized() and self.tray.isVisible() and self.tray.supportsMessages():
-                self.tray.showMessage(APP_NAME, "Связь с комнатой завершена.", self.windowIcon())
+            if data:
+                self.notifications.publish("Связь с комнатой завершена", data, "Связь с комнатой завершена.")
 
     def focus_changed(self, state):
         if state != Qt.ApplicationState.ApplicationActive:
@@ -1409,12 +1555,28 @@ class Window(FramelessWindow):
                 self.reflow_timer.start(0)
         if event.type() == QEvent.Type.Show and isinstance(watched, QDialog) and watched.parent() is self:
             self.release_ptt()
-        if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and event.key() == Qt.Key.Key_F8:
-            room_visible = self.body_stack.currentWidget() is self.main_body
-            if self.keyboard or (room_visible and QApplication.activeModalWidget() is None and self.ptt_control.isEnabled()):
-                if not event.isAutoRepeat():
-                    self.set_pressed("keyboard", event.type() == QEvent.Type.KeyPress)
-                return True
+        if event.type() == QEvent.Type.KeyRelease and self.keyboard and event.key() == self.ptt_down_key:
+            if not event.isAutoRepeat():
+                self.ptt_down_key = None
+                self.set_pressed("keyboard", False)
+            return True
+        if (event.type() == QEvent.Type.KeyPress and isinstance(watched, QWidget) and watched.window() is self
+                and self.body_stack.currentWidget() is self.main_body and QApplication.activeModalWidget() is None):
+            combo = event.keyCombination()
+            sequence = QKeySequence(combo)
+            editing = isinstance(QApplication.focusWidget(), (QLineEdit, QKeySequenceEdit))
+            if not (editing and event.text().isprintable() and event.text()
+                    and not event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+                if self.ptt_control.isEnabled() and sequence == self.hotkeys["ptt_key"]:
+                    if not event.isAutoRepeat():
+                        self.ptt_down_key = event.key()
+                        self.set_pressed("keyboard", True)
+                    return True
+                for kind, control in (("mic_key", self.mic), ("sound_key", self.sound)):
+                    if control.isEnabled() and sequence == self.hotkeys[kind]:
+                        if not event.isAutoRepeat():
+                            control.click()
+                        return True
         return super().eventFilter(watched, event)
 
     def worker_finished(self):
@@ -1439,6 +1601,10 @@ class Window(FramelessWindow):
             super().closeEvent(event)
             return
         event.ignore()
+        if not self.force_exit and not self.closing and self.preferences["tray_close"] and self.tray.isVisible():
+            self.release_ptt()
+            self.hide()
+            return
         if not self.closing:
             self.closing = True
             self.release_ptt()

@@ -8,7 +8,7 @@ from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, QSaveFile, QSize, QStan
 from PyQt6.QtGui import QColor, QImageReader
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QColorDialog, QComboBox, QDialog, QFileDialog, QFormLayout,
-    QGridLayout, QHBoxLayout, QLineEdit, QSpinBox, QWidget,
+    QGridLayout, QHBoxLayout, QLineEdit, QSizePolicy, QSpinBox, QWidget,
 )
 from cryptography.exceptions import InvalidTag
 
@@ -192,15 +192,24 @@ class ProfileEditor(QWidget):
             control.setAccessibleName(caption)
             control.setChecked(key == profile.decoration)
             self.gallery.addButton(control)
+            control.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            if key == "none":
+                control.setText(caption)
+                gallery.addWidget(control, 2, 0, 1, 3)
+                continue
+            control.setFixedHeight(84)
             cell = column(control, (4, 7, 4, 7), 4)
             avatar = Avatar(37, replace(profile, decoration=key))
             avatar.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             cell.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignHCenter)
             name = label(caption, wrap=True)
+            name.setMinimumHeight(32)
             name.setAlignment(Qt.AlignmentFlag.AlignCenter)
             name.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             cell.addWidget(name)
-            gallery.addWidget(control, i // 3, i % 3)
+            gallery.addWidget(control, (i - 1) // 3, (i - 1) % 3)
+        for index in range(3):
+            gallery.setColumnStretch(index, 1)
         self.layout.addLayout(gallery)
         self.ephemeral = switch_row(self.layout, "Режим амнезии", ephemeral, lambda _: None,
                                     detail="Не сохранять профиль и путь к GIF на диск.")

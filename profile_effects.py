@@ -31,7 +31,7 @@ class ProfileClock(QObject):
         for widget in list(self.widgets):
             try:
                 if widget.isVisible() and not widget.window().isMinimized():
-                    widget.update()
+                    widget.repaint_frame()
             except RuntimeError:
                 self.remove(widget)
         if not self.widgets:
@@ -53,6 +53,9 @@ class EffectWidget(QWidget):
 
     def phase(self):
         return time.monotonic() - self.elapsed if self.animated else 0.0
+
+    def repaint_frame(self):
+        self.update()
 
     def showEvent(self, event):
         super().showEvent(event)

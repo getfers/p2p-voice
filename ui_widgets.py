@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QPushButton,
 from branding import APP_NAME, HEADER_LOGO
 from models import STATUS
 from profile_effects import EffectWidget, avatar_decoration, banner_effect
+from render_surface import AnimatedSurface, use_opengl
 from ui_theme import GREEN, active_palette
 
 
@@ -433,12 +434,13 @@ class Banner(EffectWidget):
         self.profile = profile
         self.setFixedHeight(height)
         self.movie = None
+        self.surface = AnimatedSurface(self, self.draw_banner) if (self.animated or gif) and use_opengl() else None
         if gif:
             self.gif_data = QByteArray(gif)
             self.gif_buffer = QBuffer(self.gif_data, self)
             self.gif_buffer.open(QIODevice.OpenModeFlag.ReadOnly)
             self.movie = QMovie(self.gif_buffer, QByteArray(b"gif"), self)
-            self.movie.frameChanged.connect(lambda _frame: self.update())
+            self.movie.frameChanged.connect(lambda _frame: self.repaint_frame())
             self.movie.finished.connect(self.restart_movie)
 
     def restart_movie(self):
@@ -459,10 +461,23 @@ class Banner(EffectWidget):
             self.movie.setPaused(True)
         super().hideEvent(event)
 
+    def repaint_frame(self):
+        (self.surface or self).update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.surface is not None:
+            self.surface.setGeometry(self.rect())
+
     def paintEvent(self, _event):
-        canvas = QPainter(self)
+        if self.surface is None:
+            self.draw_banner(QPainter(self))
+
+    def draw_banner(self, canvas):
         canvas.setRenderHint(QPainter.RenderHint.Antialiasing)
         width, height = self.width(), self.height()
+        if self.surface is not None:
+            canvas.fillRect(self.rect(), QColor(active_palette()["card"]))
         mask = QPainterPath()
         mask.addRoundedRect(QRectF(0, 0, width, height), 8, 8)
         canvas.setClipPath(mask)
@@ -536,9 +551,10 @@ class ProfileHeader(QWidget):
 
 
 class Meter(QWidget):
-    def __init__(self):
+    def __init__(self, threshold=None):
         super().__init__()
         self.level = -90.0
+        self.threshold = threshold
         self.setFixedHeight(11)
         self.setAccessibleName("Уровень микрофона")
 
@@ -546,13 +562,21 @@ class Meter(QWidget):
         self.level = value
         self.update()
 
+    def set_threshold(self, value):
+        self.threshold = value
+        self.update()
+
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         step = self.width() / 32
-        active = min(32, max(0, round((self.level + 60) / 60 * 32)))
+        active = min(32, max(0, round((self.level + 75) / 75 * 32)))
         for index in range(32):
             fill = active_palette()["meter"] if index >= active else GREEN
             painter.setBrush(QColor(fill))
             painter.drawRoundedRect(QRectF(index * step, 1, max(1, step - 3), 9), 2, 2)
+        if self.threshold is not None:
+            position = self.width() * (self.threshold + 75) / 75
+            painter.setPen(QPen(QColor(active_palette()["text"]), 2))
+            painter.drawLine(QPointF(position, 0), QPointF(position, self.height()))

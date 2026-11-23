@@ -8,6 +8,12 @@ from PyQt6.QtWidgets import QApplication
 
 
 GREEN = "#10a37f"
+ACCENTS = {
+    "mono": ("Чёрный монохром Codex", None), "emerald": ("Изумрудный", "#08765c"),
+    "indigo": ("Индиго", "#5246ba"), "graphite": ("Графит", "#485467"),
+    "amber": ("Янтарный", "#935400"),
+}
+DENSITIES = {"compact": ("Компактный", .82), "normal": ("Обычный", 1.0), "large": ("Крупный", 1.22)}
 PALETTES = {
     "light": {
         "surface": "#ffffff", "side": "#f7f7f8", "card": "#f0f0f2", "field": "#ffffff",
@@ -104,13 +110,19 @@ QSplitter::handle:pressed { background: $selected; }
 def active_palette():
     app = QApplication.instance()
     name = app.property("sekretTheme") if app is not None else "light"
-    return PALETTES.get(name, PALETTES["light"])
+    colors = PALETTES.get(name, PALETTES["light"])
+    accent = app.property("sekretAccent") if app is not None else None
+    _, color = ACCENTS.get(accent, ACCENTS["mono"])
+    if color:
+        return {**colors, "primary": color, "on_primary": "#ffffff", "focus": color}
+    return colors
 
 
-def apply_palette(name, widget, scale=100):
+def apply_palette(name, widget, scale=100, accent="mono", density="normal"):
     app = QApplication.instance()
     app.setProperty("sekretTheme", name)
-    colors = PALETTES[name]
+    app.setProperty("sekretAccent", accent)
+    colors = active_palette()
     palette = QPalette()
     for role, key in (
         (QPalette.ColorRole.Window, "surface"), (QPalette.ColorRole.WindowText, "text"),
@@ -129,4 +141,8 @@ def apply_palette(name, widget, scale=100):
         rules = sub(r"(font-size|min-height): (\d+)px", lambda m: (
             f"{m[1]}: {round(int(m[2]) * scale / 100)}px" if int(m[2]) >= 10 else m[0]
         ), rules)
+    _, spacing = DENSITIES[density]
+    rules = sub(r"(padding(?:-left|-right)?): ([\dpx ]+);", lambda m: (
+        f"{m[1]}: " + sub(r"(\d+)px", lambda px: f"{round(int(px[1]) * spacing)}px", m[2]) + ";"
+    ), rules)
     widget.setStyleSheet(rules)

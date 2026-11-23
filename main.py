@@ -16,7 +16,7 @@ from av.error import FFmpegError
 from audio import Audio, DEVICES_ERRORS, devices
 from branding import APP_NAME, ASSETS
 from crypto import Identity, b64, unb64
-from network import VOICE, Room
+from network import Room
 from screen_media import FPS, LatestImage, ScreenEncoder, ScreenTrack
 from ui import Window
 
@@ -219,7 +219,7 @@ class SessionWorker(QThread):
 
     def send_voice(self, payload):
         if self.room is not None:
-            self.room.broadcast(VOICE, payload)
+            self.room.transmit_voice(payload, self.audio.encode)
 
     async def serve(self):
         self.audio = Audio(self.emit)
@@ -266,7 +266,7 @@ def main():
     app.setApplicationDisplayName(APP_NAME)
     window = Window(callsign(), SessionWorker, ephemeral=smoke)
     app.setWindowIcon(window.windowIcon())
-    window.show()
+    window.show_startup()
     if smoke:
         window.host_room(invite=False)
         ready = False
