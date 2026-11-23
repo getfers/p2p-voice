@@ -125,7 +125,8 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(guest.group, host.group)
         host.add_channel("text", "проверка")
         await self.wait_for(lambda: guest.group.text[-1].name == "проверка")
-        custom = replace(guest.profile, name="Луна", status="busy", banner_first="#663355")
+        custom = replace(guest.profile, name="Луна", status="busy", banner_first="#663355",
+                         decoration="radar", effect="aura")
         guest.update_profile(custom)
         key = guest.identity.public
         await self.wait_for(lambda: host.profiles.get(key) == custom)

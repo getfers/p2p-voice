@@ -30,7 +30,7 @@ jobs:
         run: |
           $python = (Get-Command python).Source
           $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
-          & $python -m PyInstaller --noconfirm --clean --noupx --onefile --windowed --name sekret --icon=assets/app_icon.ico --add-data "assets/app_icon.png:assets" --add-data "assets/logo_header.png:assets" --collect-all av --recursive-copy-metadata aiortc --recursive-copy-metadata PyQt6 --recursive-copy-metadata sounddevice --recursive-copy-metadata scipy main.py
+          & $python -m PyInstaller --noconfirm --clean --noupx --onefile --windowed --name sekret --icon=assets/app_icon.ico --add-data "assets/app_icon.png:assets" --add-data "assets/logo_header.png:assets" --add-data "assets/notification.wav:assets" --collect-all av --recursive-copy-metadata aiortc --recursive-copy-metadata PyQt6 --recursive-copy-metadata sounddevice --recursive-copy-metadata scipy main.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $exe = Resolve-Path dist/sekret.exe
           $process = Start-Process -FilePath $exe -ArgumentList '--self-test' -WorkingDirectory $env:RUNNER_TEMP -WindowStyle Hidden -Wait -PassThru

@@ -36,9 +36,17 @@ python3 -m venv .venv
 
 Оба компьютера должны использовать версию с приглашениями `invite2`. Приглашения из прежних сборок имеют другой формат.
 
+## Окно, темы и уведомления
+
+Перетаскивайте окно за шапку, а для изменения размера потяните за любой край или угол. Двойное нажатие на шапку разворачивает окно или восстанавливает его размер. Клавиша F11 переключает полноэкранный режим. Ширина колонок и высота блоков звонка и чата меняются перетягиванием разделителей. Кнопки панелей в шапке сворачивают навигацию и инспектор.
+
+Светлая тема включается при запуске. В «Настройках» можно выбрать тёмную тему и отключить звук уведомлений. Тема и переключатель звука действуют до закрытия приложения.
+
+При новом сообщении или подключении участника появляется всплывающее уведомление. В фоне Windows привлекает внимание миганием кнопки на панели задач и уведомлением в трее, если его разрешают системные настройки. Системное уведомление содержит только тип события. Текст сообщения виден во всплывающем блоке внутри приложения.
+
 ## Профиль и студия голоса
 
-Карандаш, «Баннер» и «Цвет» в карточке «Мой профиль» открывают редактор. Можно сменить ник, статус, аватар и два цвета градиента. Аватар обрезается по центру и передаётся как JPEG 128×128. «Невидимка» отображается для собеседников как «Не в сети». Список подключённых к комнате всё равно показывает участника.
+Карандаш, «Баннер» и «Цвет» в карточке «Мой профиль» открывают редактор. Можно сменить ник, статус, аватар и два цвета градиента. Шесть рамок аватара и четыре эффекта баннера доступны с живым предпросмотром. Проверенные собеседники получают выбранные эффекты вместе с профилем и воспроизводят их локально. Аватар обрезается по центру и передаётся как JPEG 128×128. «Невидимка» отображается для собеседников как «Не в сети». Список подключённых к комнате всё равно показывает участника.
 
 По умолчанию включён режим амнезии, профиль хранится в памяти. Снимите галочку и сохраните профиль, если хотите использовать его после перезапуска. Ранее сохранённый профиль доступен и после переименования. Включение амнезии удаляет сохранённый профиль из обоих каталогов конфигурации. Группы, сообщения, настройки звонка и ключи остаются в памяти.
 
@@ -81,12 +89,12 @@ $python = '.\.venv\Scripts\python.exe'
 $savedPath = $env:Path
 try {
     $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
-    & $python -m PyInstaller --noconfirm --clean --noupx --onefile --windowed --name sekret --icon=assets/app_icon.ico --add-data "assets/app_icon.png:assets" --add-data "assets/logo_header.png:assets" --collect-all av --recursive-copy-metadata aiortc --recursive-copy-metadata PyQt6 --recursive-copy-metadata sounddevice --recursive-copy-metadata scipy main.py
+    & $python -m PyInstaller --noconfirm --clean --noupx --onefile --windowed --name sekret --icon=assets/app_icon.ico --add-data "assets/app_icon.png:assets" --add-data "assets/logo_header.png:assets" --add-data "assets/notification.wav:assets" --collect-all av --recursive-copy-metadata aiortc --recursive-copy-metadata PyQt6 --recursive-copy-metadata sounddevice --recursive-copy-metadata scipy main.py
 } finally {
     $env:Path = $savedPath
 }
 ```
 
-Готовый файл находится в `dist/sekret.exe`. PyInstaller встраивает иконку в исполняемый файл и включает оба PNG в сборку. При запуске библиотеки и ресурсы распаковываются во временный каталог. GitHub Actions после каждого пуша в `main` проверяет запуск, собирает Windows x64 и публикует `sekret.exe` вместе с SHA-256. Для сборки с собственными библиотеками Qt используйте исходники и команду PyInstaller выше. Пакет PyQt6 можно собрать с выбранной версией Qt по официальным инструкциям. [GitHub Releases](https://github.com/getfers/p2p-voice/releases)
+Готовый файл находится в `dist/sekret.exe`. PyInstaller встраивает иконку в исполняемый файл и включает логотипы и звук уведомлений. При запуске библиотеки и ресурсы распаковываются во временный каталог. GitHub Actions после каждого пуша в `main` проверяет запуск, собирает Windows x64 и публикует `sekret.exe` вместе с SHA-256. Для сборки с собственными библиотеками Qt используйте исходники и команду PyInstaller выше. Пакет PyQt6 можно собрать с выбранной версией Qt по официальным инструкциям. [GitHub Releases](https://github.com/getfers/p2p-voice/releases)
 
 Лицензия исходного кода **GPL-3.0-only**. Библиотеки распространяются по своим лицензиям. Исходники и лицензионная информация доступны у авторов. [GPLv3](LICENSE) · [PyQt6](https://www.riverbankcomputing.com/software/pyqt/download) · [Qt](https://code.qt.io/cgit/qt/qtbase.git/) · [aiortc](https://github.com/aiortc/aiortc) · [PyAV и FFmpeg](https://github.com/PyAV-Org/PyAV) · [FFmpeg](https://ffmpeg.org/download.html) · [PortAudio](https://github.com/PortAudio/portaudio) · [sounddevice](https://github.com/spatialaudio/python-sounddevice) · [cryptography](https://github.com/pyca/cryptography)

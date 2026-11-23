@@ -13,8 +13,9 @@ from PyQt6.QtWidgets import (
 
 from branding import APP_NAME
 from crypto import MAX_TOKEN, json_bytes
-from models import MAX_AVATAR, MAX_PROFILE, Profile, STATUS, title
+from models import DECORATIONS, MAX_AVATAR, MAX_PROFILE, PROFILE_EFFECTS, Profile, STATUS, title
 from network import DIRECT, PROXY
+from ui_chrome import AnimatedDialog
 from ui_widgets import ProfileHeader, button, column, label
 
 
@@ -92,7 +93,7 @@ def load_avatar(path):
     raise ValueError("Изображение не удалось сжать до допустимого размера.")
 
 
-class ProfileDialog(QDialog):
+class ProfileDialog(AnimatedDialog):
     def __init__(self, parent, profile, ephemeral, save, focus=None):
         super().__init__(parent)
         self.setWindowTitle("Мой профиль")
@@ -123,6 +124,18 @@ class ProfileDialog(QDialog):
         form.addRow("Баннер", colors)
         self.accent = button("Выбрать цвет", lambda: self.pick_color("accent"), icon_name="color")
         form.addRow("Цвет профиля", self.accent)
+        self.decoration = QComboBox()
+        self.effect = QComboBox()
+        for combo, options, selected in (
+            (self.decoration, DECORATIONS, profile.decoration),
+            (self.effect, PROFILE_EFFECTS, profile.effect),
+        ):
+            for key, caption in options.items():
+                combo.addItem(caption, key)
+            combo.setCurrentIndex(combo.findData(selected))
+            combo.currentIndexChanged.connect(self.update_preview)
+        form.addRow("Украшение аватара", self.decoration)
+        form.addRow("Эффект баннера", self.effect)
         self.layout.addLayout(form)
         self.ephemeral = QCheckBox("Режим амнезии — не сохранять профиль на диск")
         self.ephemeral.setChecked(ephemeral)
@@ -148,7 +161,10 @@ class ProfileDialog(QDialog):
 
     def update_preview(self):
         name = self.name.text().strip() or self.profile.name
-        self.profile = replace(self.profile, name=name, status=self.status.currentData())
+        self.profile = replace(
+            self.profile, name=name, status=self.status.currentData(),
+            decoration=self.decoration.currentData(), effect=self.effect.currentData(),
+        )
         self.draw_preview()
 
     def update_colors(self):
@@ -189,7 +205,7 @@ class ProfileDialog(QDialog):
         self.accept()
 
 
-class ExchangeDialog(QDialog):
+class ExchangeDialog(AnimatedDialog):
     def __init__(self, parent, host, mode, dispatch, copy):
         super().__init__(parent)
         self.host, self.mode, self.dispatch, self.copy = host, mode, dispatch, copy
@@ -326,7 +342,7 @@ class ExchangeDialog(QDialog):
             self.cancel.setEnabled(self.is_busy or self.pending)
 
 
-class SasDialog(QDialog):
+class SasDialog(AnimatedDialog):
     def __init__(self, parent, name, code, confirm):
         super().__init__(parent)
         self.setWindowTitle("Проверка собеседника")

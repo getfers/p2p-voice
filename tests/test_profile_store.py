@@ -21,7 +21,7 @@ class ProfileStoreTest(unittest.TestCase):
             with patch("ui_dialogs.QStandardPaths.writableLocation", return_value=str(root / APP_NAME)):
                 store = ProfileStore()
                 self.assertEqual(store.load(Profile("Новый ник")), (saved, False))
-                updated = Profile("Обновлённый ник")
+                updated = Profile("Обновлённый ник", decoration="sparks", effect="waves")
                 store.save(updated, False)
                 self.assertEqual(store.load(saved), (updated, False))
                 store.save(updated, True)

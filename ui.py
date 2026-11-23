@@ -3,22 +3,26 @@
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime
+from html import escape
 
 from PyQt6.QtCore import QEvent, QSize, QSignalBlocker, QTimer, Qt
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtGui import QFont, QIcon, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame,
-    QGridLayout, QHBoxLayout, QInputDialog, QMainWindow, QMenu, QSizePolicy, QSystemTrayIcon, QWidget,
+    QGridLayout, QHBoxLayout, QInputDialog, QMenu, QSizePolicy, QSystemTrayIcon, QWidget,
 )
 
 from audio import EFFECTS
 from branding import APP_ICON, APP_NAME
 from models import Group, Profile
 from network import DIRECT, PROXY, STUN
+from notifications import Notifications
+from ui_chrome import AnimatedDialog, FramelessWindow, PaneTransition, Splitter, TitleBar
 from ui_dialogs import ExchangeDialog, NETWORK_NAMES, ProfileDialog, ProfileStore, SasDialog, field
+from ui_theme import active_palette, apply_palette
 from ui_widgets import (
-    FOREGROUND, GREEN, MUTED, STYLE, Avatar, Meter, ProfileHeader, brand_logo, button, column, divider, icon,
-    label, panel, refresh, scroll_area,
+    AnimatedButton, Avatar, BrandLogo, Meter, ProfileHeader, Symbol, button, column,
+    divider, label, panel, refresh, scroll_area,
 )
 
 
@@ -48,13 +52,6 @@ def clear(layout):
             child = item.layout()
             clear(child)
             child.deleteLater()
-
-
-def picture(symbol, fill=MUTED, side=16):
-    widget = label()
-    widget.setFixedSize(side, side)
-    widget.setPixmap(icon(symbol, fill).pixmap(side, side))
-    return widget
 
 
 @dataclass(frozen=True)
@@ -87,14 +84,14 @@ class MemberButton(QWidget):
             content.setSpacing(7)
             self.avatar = Avatar(24, profile, ring=speaking)
             content.addWidget(self.avatar)
-            name = label(profile.name)
+            name = label(profile.name, elide=True)
             name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             content.addWidget(name, 1)
         else:
             content = column(self.control, (4, 8, 4, 7), 2)
             self.avatar = Avatar(52, profile, ring=speaking)
             content.addWidget(self.avatar, alignment=Qt.AlignmentFlag.AlignHCenter)
-            name = label(profile.name)
+            name = label(profile.name, elide=True)
             name.setAlignment(Qt.AlignmentFlag.AlignCenter)
             name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             content.addWidget(name)
@@ -116,10 +113,12 @@ class MemberButton(QWidget):
         self.avatar.update()
         if self.caption is not None:
             self.caption.setText("Говорит" if speaking else "Вы" if self.own else "В канале")
-            self.caption.setStyleSheet(f"color: {GREEN};" if speaking else "")
+            self.caption.setObjectName("secure" if speaking else "muted")
+            self.caption.style().unpolish(self.caption)
+            self.caption.style().polish(self.caption)
 
 
-class Window(QMainWindow):
+class Window(FramelessWindow):
     def __init__(self, name, worker_type, *, ephemeral=False):
         super().__init__()
         self.profile_store = ProfileStore(ephemeral)
@@ -151,6 +150,12 @@ class Window(QMainWindow):
         self.noise = True
         self.closing = False
         self.worker_done = False
+        self.fade_done = False
+        self.theme = "light"
+        self.compact_header = None
+        self.compact_call = None
+        self.stage_columns = 3
+        self.maximized_before_fullscreen = False
         self.signal_dialog = None
         self.invitation = ("", "")
         self.reply = ""
@@ -159,11 +164,15 @@ class Window(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(str(APP_ICON)))
         self.resize(1280, 800)
-        self.setMinimumSize(1070, 640)
+        self.setMinimumSize(960, 640)
         self.setFont(QFont("Segoe UI", 10))
-        self.setStyleSheet(STYLE)
+        apply_palette(self.theme, self)
         self.build()
         self.setup_tray()
+        self.notifications = Notifications(self, self.tray)
+        self.state_changed.connect(self.update_window_state)
+        fullscreen = QShortcut(QKeySequence("F11"), self)
+        fullscreen.activated.connect(self.toggle_fullscreen)
         self.worker = worker_type(self)
         self.worker.session_event.connect(self.dispatch)
         self.worker.finished.connect(self.worker_finished)
@@ -177,38 +186,111 @@ class Window(QMainWindow):
     def build(self):
         root = QWidget()
         frame = column(root, spacing=0)
-        titlebar = QWidget()
-        titlebar.setObjectName("titlebar")
+        titlebar = self.titlebar = TitleBar(self)
         titlebar.setFixedHeight(49)
         title = QHBoxLayout(titlebar)
-        title.setContentsMargins(18, 0, 16, 0)
-        self.header_logo = brand_logo(27)
+        title.setContentsMargins(17, 0, 10, 0)
+        title.setSpacing(5)
+        self.header_logo = BrandLogo(27)
+        self.header_logo.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         title.addWidget(self.header_logo)
         title.addStretch()
+        self.nav_toggle = button(icon_name="panel-left", role="flat", toggle=True, width=33)
+        self.inspector_toggle = button(icon_name="panel-right", role="flat", toggle=True, width=33)
+        title.addWidget(self.nav_toggle)
+        title.addWidget(self.inspector_toggle)
+        preferences = button(callback=self.show_settings, role="flat", icon_name="sliders", width=33)
+        preferences.setToolTip("Настройки")
+        preferences.setAccessibleName("Настройки")
+        title.addWidget(preferences)
         title.addWidget(button("О программе", self.show_about, role="flat"))
+        for glyph, tooltip, callback, role in (
+            ("minimize", "Свернуть окно", self.showMinimized, "chrome"),
+            ("maximize", "Развернуть окно", self.toggle_maximized, "chrome"),
+            ("close", "Закрыть окно", self.close, "closeWindow"),
+        ):
+            control = button(callback=callback, icon_name=glyph, role=role)
+            control.setFixedSize(34, 32)
+            control.setIconSize(QSize(17, 17))
+            control.setToolTip(tooltip)
+            control.setAccessibleName(tooltip)
+            title.addWidget(control)
+            if glyph == "maximize":
+                self.maximize_control = control
         frame.addWidget(titlebar)
         body = horizontal(spacing=0)
         self.rail = QWidget()
         self.rail.setObjectName("groupRail")
-        self.rail.setFixedWidth(72)
+        self.rail.setFixedWidth(64)
         self.rail_layout = column(self.rail, (0, 15, 0, 10), 10)
         body.addWidget(self.rail)
+        self.columns = Splitter(Qt.Orientation.Horizontal)
         self.navigation = QWidget()
         self.navigation.setObjectName("navigation")
-        self.navigation.setFixedWidth(237)
+        self.navigation.setMinimumWidth(177)
         self.build_navigation()
-        body.addWidget(self.navigation)
+        self.columns.addWidget(self.navigation)
         self.workspace = QWidget()
         self.workspace.setObjectName("workspace")
+        self.workspace.setMinimumWidth(405)
         self.build_workspace()
-        body.addWidget(self.workspace, 1)
+        self.columns.addWidget(self.workspace)
         self.inspector = QWidget()
         self.inspector.setObjectName("inspector")
-        self.inspector.setFixedWidth(325)
+        self.inspector.setMinimumWidth(282)
         self.build_inspector()
-        body.addWidget(self.inspector)
+        self.columns.addWidget(self.inspector)
+        self.columns.setStretchFactor(0, 0)
+        self.columns.setStretchFactor(1, 1)
+        self.columns.setStretchFactor(2, 0)
+        body.addWidget(self.columns, 1)
         frame.addLayout(body, 1)
         self.setCentralWidget(root)
+        self.nav_pane = PaneTransition(self.columns, self.navigation, self.workspace, 220)
+        self.right_pane = PaneTransition(self.columns, self.inspector, self.workspace, 316)
+        for pane, toggle, name in (
+            (self.nav_pane, self.nav_toggle, "панель каналов"),
+            (self.right_pane, self.inspector_toggle, "инспектор"),
+        ):
+            toggle.clicked.connect(pane.set_expanded)
+            pane.changed.connect(
+                lambda visible, control=toggle, subject=name: self.update_pane_button(control, subject, visible)
+            )
+            self.update_pane_button(toggle, name, True)
+        self.reflow_timer = QTimer(self, singleShot=True)
+        self.reflow_timer.timeout.connect(self.reflow_workspace)
+        self.workspace.installEventFilter(self)
+        QTimer.singleShot(0, self.start_layout)
+
+    def start_layout(self):
+        self.columns.setSizes([220, max(405, self.columns.width() - 552), 316])
+        self.room_split.setSizes([225, 360])
+        self.reflow_workspace()
+
+    @staticmethod
+    def update_pane_button(control, name, expanded):
+        control.setChecked(expanded)
+        caption = f"{'Свернуть' if expanded else 'Показать'} {name}"
+        control.setToolTip(caption)
+        control.setAccessibleName(caption)
+
+    def update_window_state(self):
+        maximized = self.isMaximized() or self.isFullScreen()
+        self.maximize_control.set_glyph("restore" if maximized else "maximize")
+        caption = "Восстановить размер окна" if maximized else "Развернуть окно"
+        self.maximize_control.setToolTip(caption)
+        self.maximize_control.setAccessibleName(caption)
+        if not self.isMinimized():
+            QTimer.singleShot(0, self.notifications.resume)
+
+    def toggle_fullscreen(self):
+        if not self.isFullScreen():
+            self.maximized_before_fullscreen = self.isMaximized()
+            self.showFullScreen()
+        elif self.maximized_before_fullscreen:
+            self.showMaximized()
+        else:
+            self.showNormal()
 
     def setup_tray(self):
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
@@ -236,66 +318,107 @@ class Window(QMainWindow):
 
     def show_about(self):
         self.restore_window()
-        dialog = QDialog(self)
+        dialog = AnimatedDialog(self)
         dialog.setWindowTitle(f"О программе · {APP_NAME}")
         dialog.setWindowIcon(self.windowIcon())
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.setMinimumWidth(340)
         layout = column(dialog, (24, 24, 24, 20), 14)
-        layout.addWidget(brand_logo(33), alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(BrandLogo(33), alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(label("Голосовые комнаты и чат со сквозным шифрованием.", "muted", True))
         layout.addWidget(button("Закрыть", dialog.accept, role="primary"), alignment=Qt.AlignmentFlag.AlignRight)
         dialog.open()
 
+    def show_settings(self):
+        dialog = AnimatedDialog(self)
+        dialog.setWindowTitle(f"Настройки · {APP_NAME}")
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.setMinimumWidth(345)
+        layout = column(dialog, (22, 19, 22, 18), 12)
+        form = QFormLayout()
+        theme = QComboBox()
+        theme.addItem("Светлая (Codex Light)", "light")
+        theme.addItem("Тёмная (Codex Dark)", "dark")
+        theme.setCurrentIndex(theme.findData(self.theme))
+        theme.currentIndexChanged.connect(lambda: self.set_theme(theme.currentData()))
+        form.addRow("Тема", theme)
+        layout.addLayout(form)
+        sound = QCheckBox("Звуки уведомлений")
+        sound.setChecked(self.notifications.sound_enabled)
+        sound.toggled.connect(self.notifications.set_sound)
+        layout.addWidget(sound)
+        layout.addWidget(button("Готово", dialog.accept, role="primary"), alignment=Qt.AlignmentFlag.AlignRight)
+        dialog.open()
+
+    def set_theme(self, name):
+        if name != self.theme:
+            self.theme = name
+            apply_palette(name, self)
+            for kind in (BrandLogo, AnimatedButton, Symbol):
+                for widget in self.findChildren(kind):
+                    widget.refresh_theme()
+            self.render_rail()
+            self.update_controls()
+            self.update()
+
     def build_navigation(self):
-        layout = column(self.navigation, (15, 18, 15, 16), 10)
-        self.group_title = label("", "groupTitle")
+        layout = column(self.navigation, (12, 16, 12, 14), 9)
+        self.group_title = label("", "groupTitle", elide=True)
         self.group_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         layout.addWidget(self.group_title)
-        self.group_members = label("", "muted")
+        self.group_members = label("", "muted", elide=True)
         layout.addWidget(self.group_members)
         layout.addWidget(divider())
         nav, self.channel_list = scroll_area()
         self.channel_list.setSpacing(4)
         layout.addWidget(nav, 1)
         layout.addWidget(label("МОЙ ПРОФИЛЬ", "section"))
-        self.self_card, self.self_layout = panel(margins=(11, 10, 11, 11), spacing=8)
+        self.self_card, self.self_layout = panel(margins=(8, 9, 8, 9), spacing=7)
         layout.addWidget(self.self_card)
 
     def build_workspace(self):
-        layout = column(self.workspace, (22, 20, 22, 17), 14)
-        header = horizontal(spacing=7)
-        title_box = QWidget()
-        headings = column(title_box, spacing=1)
-        self.breadcrumb = label("", "muted")
+        layout = column(self.workspace, (17, 15, 17, 13), 10)
+        self.workspace_header = QGridLayout()
+        self.workspace_header.setSpacing(6)
+        self.title_box = QWidget()
+        headings = column(self.title_box, spacing=1)
+        self.breadcrumb = label("", "muted", elide=True)
         self.breadcrumb.setMinimumHeight(18)
         self.breadcrumb.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.channel_title = label("", "channelTitle")
+        self.channel_title = label("", "channelTitle", elide=True)
         self.channel_title.setMinimumHeight(45)
         self.channel_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         headings.addWidget(self.breadcrumb)
         headings.addWidget(self.channel_title)
-        header.addWidget(title_box, 1)
+        self.header_actions = QWidget()
+        actions = horizontal()
+        self.header_actions.setLayout(actions)
         self.create = button("Создать комнату", self.host_room, role="primary", icon_name="plus")
         self.join_control = button("Войти по токену", self.open_join, icon_name="key")
         for control in (self.create, self.join_control):
             control.setFixedHeight(37)
-            header.addWidget(control, alignment=Qt.AlignmentFlag.AlignVCenter)
-        layout.addLayout(header)
-        call, call_layout = panel(margins=(17, 15, 17, 16), spacing=12)
+            actions.addWidget(control)
+        layout.addLayout(self.workspace_header)
+        self.room_split = Splitter(Qt.Orientation.Vertical)
+        layout.addWidget(self.room_split, 1)
+        call, call_layout = panel(margins=(13, 10, 13, 11), spacing=8)
+        self.call_panel = call
         voice_heading = horizontal()
-        voice_heading.addWidget(picture("voice"))
+        voice_heading.addWidget(Symbol("voice"))
         voice_heading.addWidget(label("В голосовом канале", "subheading"), 1)
         self.badge = label("E2EE", "badge")
         voice_heading.addWidget(self.badge)
         call_layout.addLayout(voice_heading)
+        stage_view, stage_layout = scroll_area()
         self.stage = QWidget()
-        self.stage.setMinimumHeight(118)
+        self.stage.setMinimumHeight(105)
+        stage_layout.addWidget(self.stage, 1)
         self.stage_grid = QGridLayout(self.stage)
         self.stage_grid.setContentsMargins(0, 0, 0, 0)
         self.stage_grid.setSpacing(8)
-        call_layout.addWidget(self.stage)
-        controls = horizontal(spacing=5)
+        call_layout.addWidget(stage_view, 1)
+        self.call_controls = QGridLayout()
+        self.call_controls.setSpacing(5)
         self.mic = button("Микрофон", self.set_mic, icon_name="mic", toggle=True)
         self.mic.setObjectName("microphone")
         self.sound = button("Звук", self.set_sound, icon_name="headphones", toggle=True)
@@ -304,16 +427,17 @@ class Window(QMainWindow):
         self.ptt_control.released.connect(lambda: self.set_pressed("mouse", False))
         self.invite = button("Пригласить", self.open_invite)
         self.leave = button("Выйти", self.leave_room, icon_name="close")
-        for control in (self.mic, self.sound, self.ptt_control, self.invite, self.leave):
-            control.setFixedHeight(35)
+        self.call_buttons = (self.mic, self.sound, self.ptt_control, self.invite, self.leave)
+        for control in self.call_buttons:
+            control.setFixedHeight(33)
             control.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            controls.addWidget(control)
-        call_layout.addLayout(controls)
-        layout.addWidget(call)
+        call_layout.addLayout(self.call_controls)
+        self.room_split.addWidget(call)
         chat_frame, chat = panel("inset", margins=(17, 14, 17, 15), spacing=9)
         chat_header = horizontal()
-        chat_header.addWidget(picture("hash"))
-        self.chat_title = label("", "subheading")
+        chat_header.addWidget(Symbol("hash"))
+        self.chat_title = label("", "subheading", elide=True)
+        self.chat_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         chat_header.addWidget(self.chat_title, 1)
         chat_header.addWidget(label("Текстовый канал", "muted"))
         chat.addLayout(chat_header)
@@ -331,14 +455,54 @@ class Window(QMainWindow):
         self.send_chat.setAccessibleName("Отправить сообщение")
         composer.addWidget(self.send_chat)
         chat.addLayout(composer)
-        layout.addWidget(chat_frame, 1)
+        chat_frame.setMinimumHeight(139)
+        self.room_split.addWidget(chat_frame)
+        self.room_split.setStretchFactor(0, 0)
+        self.room_split.setStretchFactor(1, 1)
         self.notice = label("", "notice", True)
         self.notice.hide()
         layout.addWidget(self.notice)
+        self.reflow_workspace()
+
+    def reflow_workspace(self):
+        width = self.workspace.width()
+        compact = width < 545
+        if compact != self.compact_header:
+            self.compact_header = compact
+            for widget in (self.title_box, self.header_actions):
+                self.workspace_header.removeWidget(widget)
+            if compact:
+                self.workspace_header.addWidget(self.title_box, 0, 0, 1, 2)
+                self.workspace_header.addWidget(self.header_actions, 1, 0, 1, 2, Qt.AlignmentFlag.AlignLeft)
+            else:
+                self.workspace_header.addWidget(self.title_box, 0, 0)
+                self.workspace_header.addWidget(self.header_actions, 0, 1, Qt.AlignmentFlag.AlignVCenter)
+            self.workspace_header.setColumnStretch(0, 1)
+        if compact != self.compact_call:
+            self.compact_call = compact
+            for control in self.call_buttons:
+                self.call_controls.removeWidget(control)
+            if compact:
+                for index, control in enumerate(self.call_buttons):
+                    row, column_number = (0, index * 2) if index < 3 else (1, (index - 3) * 3)
+                    self.call_controls.addWidget(control, row, column_number, 1, 2 if row == 0 else 3)
+                for index in range(6):
+                    self.call_controls.setColumnStretch(index, 1)
+            else:
+                for index, control in enumerate(self.call_buttons):
+                    self.call_controls.addWidget(control, 0, index)
+                    self.call_controls.setColumnStretch(index, 1)
+                self.call_controls.setColumnStretch(5, 0)
+            self.call_panel.setMinimumHeight(172 if compact else 137)
+        columns = 2 if width < 470 else 3 if compact else 4
+        if columns != self.stage_columns:
+            self.stage_columns = columns
+            self.render_stage()
 
     def build_inspector(self):
-        outer = column(self.inspector, (15, 14, 15, 14), 0)
+        outer = column(self.inspector, (10, 12, 10, 12), 0)
         scroller, layout = scroll_area()
+        self.inspector_scroll = scroller
         layout.setSpacing(12)
         outer.addWidget(scroller)
         profile_title = horizontal()
@@ -349,12 +513,12 @@ class Window(QMainWindow):
         self.close_profile = close_profile
         profile_title.addWidget(close_profile)
         layout.addLayout(profile_title)
-        self.profile_card, self.inspector_profile = panel(margins=(13, 12, 13, 12), spacing=8)
+        self.profile_card, self.inspector_profile = panel(margins=(11, 11, 11, 11), spacing=8)
         self.profile_card.setMinimumHeight(194)
         layout.addWidget(self.profile_card)
-        studio, studio_layout = panel(margins=(14, 12, 14, 12), spacing=7)
+        studio, studio_layout = panel(margins=(11, 11, 11, 11), spacing=7)
         studio_title = horizontal()
-        studio_title.addWidget(picture("sliders"))
+        studio_title.addWidget(Symbol("sliders"))
         studio_title.addWidget(label("Студия голоса", "subheading"), 1)
         setup = button(callback=self.audio_settings, role="flat", icon_name="sliders", width=29)
         setup.setAccessibleName("Настройки аудиоустройств")
@@ -387,9 +551,9 @@ class Window(QMainWindow):
             effects.addWidget(control, i // 2, i % 2)
         studio_layout.addLayout(effects)
         layout.addWidget(studio)
-        network, network_layout = panel(margins=(14, 12, 14, 12), spacing=7)
+        network, network_layout = panel(margins=(11, 11, 11, 11), spacing=7)
         network_title = horizontal()
-        self.network_icon = picture("shield")
+        self.network_icon = Symbol("shield")
         network_title.addWidget(self.network_icon)
         network_title.addWidget(label("Сеть и защита", "subheading"), 1)
         self.net_status = label("E2EE", "secure")
@@ -443,14 +607,15 @@ class Window(QMainWindow):
         row.setLayout(layout)
         marker = QFrame()
         marker.setFixedSize(3, 22)
-        marker.setStyleSheet(f"background: {FOREGROUND}; border-radius: 1px;" if checked else "background: transparent;")
+        tone = active_palette()["text"] if checked else "transparent"
+        marker.setStyleSheet(f"background: {tone}; border-radius: 1px;")
         layout.addWidget(marker, alignment=Qt.AlignmentFlag.AlignVCenter)
         layout.addStretch()
         control = button("" if glyph else name[:1].upper(), action, icon_name=glyph, role="round", toggle=True)
         control.setIconSize(QSize(22, 22))
         control.setFixedSize(44, 44)
         control.setChecked(checked)
-        control.setToolTip(name)
+        control.setToolTip(f"<p>{escape(name)}</p>")
         control.setAccessibleName(name)
         layout.addWidget(control)
         layout.addStretch()
@@ -536,7 +701,6 @@ class Window(QMainWindow):
     def render_navigation(self):
         group = self.group()
         self.group_title.setText(group.name)
-        self.group_title.setToolTip(group.name)
         count = len(self.members) if self.group_in_view() else 1
         word = "участник" if count == 1 else "участника" if 2 <= count <= 4 else "участников"
         self.group_members.setText(f"Группа · {count} {word}")
@@ -560,7 +724,7 @@ class Window(QMainWindow):
                 control = button(channel.name, lambda _=False, k=kind, value=channel.key: self.choose_channel(k, value),
                                  role="row", icon_name=glyph, toggle=True)
                 control.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-                control.setToolTip(channel.name)
+                control.elide_caption()
                 control.setChecked(self.current_channel(kind).key == channel.key)
                 row.addWidget(control, 1)
                 if kind == "voice":
@@ -604,13 +768,16 @@ class Window(QMainWindow):
         voice = self.current_channel("voice")
         people = [(key, member) for key, member in self.members.items()
                   if self.group_in_view() and member.voice == voice.key]
-        count = min(len(people), 4)
+        cols = self.stage_columns
+        count = min(len(people), cols)
         for i in range(4):
             self.stage_grid.setColumnStretch(i, int(i < count))
         if not people:
+            self.stage.setMinimumHeight(103)
             card, layout = panel("inset", margins=(12, 17, 12, 15))
             layout.addStretch()
-            title = label(voice.name if self.overview else "Канал свободен", "subheading")
+            title = label(voice.name if self.overview else "Канал свободен", "subheading", elide=True)
+            title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             title.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(title)
             prompt = "Создайте комнату или подключитесь по приглашению." if not self.connecting else "Устанавливаем соединение…"
@@ -618,14 +785,17 @@ class Window(QMainWindow):
             hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(hint)
             layout.addStretch()
-            self.stage_grid.addWidget(card, 0, 0, 1, 4)
+            self.stage_grid.addWidget(card, 0, 0, 1, cols)
             return
+        rows = (len(people) + cols - 1) // cols
+        self.stage.setMinimumHeight(rows * 101 + (rows - 1) * self.stage_grid.spacing())
         for i, (key, member) in enumerate(people):
-            self.stage_grid.addWidget(self.member_button(key, member), i // 4, i % 4)
+            self.stage_grid.addWidget(self.member_button(key, member), i // cols, i % cols)
 
     def select_peer(self, public):
         self.inspect_peer = public
         self.inspector_open = True
+        self.right_pane.set_expanded(True)
         self.render_inspector()
         for key, widgets in self.call_rows.items():
             selected = (None if self.members[key].own else key) == public
@@ -643,15 +813,15 @@ class Window(QMainWindow):
         public = self.inspect_peer if member else None
         profile = self.display_profile(public, member) if member else self.profile
         self.profile_card.setVisible(self.inspector_open)
-        self.close_profile.setIcon(icon("close" if self.inspector_open else "plus"))
+        self.close_profile.set_glyph("close" if self.inspector_open else "plus")
         self.close_profile.setToolTip("Свернуть карточку" if self.inspector_open else "Открыть карточку")
         clear(self.inspector_profile)
         self.inspector_profile.addWidget(ProfileHeader(profile, edit=self.edit_profile if member is None else None))
         self.inspector_profile.addWidget(divider())
         row = horizontal()
-        row.addWidget(picture("shield", GREEN if member and member.verified else MUTED))
+        row.addWidget(Symbol("shield", "green" if member and member.verified else "muted"))
         text = "Ваш профиль" if not member else "Собеседник проверен" if member.verified else "Требуется сверка SAS"
-        row.addWidget(label(text, "muted"), 1)
+        row.addWidget(label(text, "muted", True), 1)
         if member:
             row.addWidget(label("SAS", "secure" if member.verified else "muted"))
         self.inspector_profile.addLayout(row)
@@ -667,7 +837,6 @@ class Window(QMainWindow):
         voice, text = self.current_channel("voice"), self.current_channel("text")
         self.breadcrumb.setText(f"Обзор / {group.name} / {voice.name}" if not self.overview else f"Обзор / {group.name}")
         self.channel_title.setText("Обзор" if self.overview else voice.name)
-        self.channel_title.setToolTip(voice.name)
         self.chat_title.setText(text.name)
         self.render_rail()
         self.render_navigation()
@@ -704,7 +873,7 @@ class Window(QMainWindow):
         self.badge.setText("E2EE защищено" if protected else "E2EE")
         refresh(self.net_status, "protected", protected)
         self.net_status.setText("E2EE защищено" if protected else "E2EE · ожидание")
-        self.network_icon.setPixmap(icon("shield", GREEN if protected else MUTED).pixmap(16, 16))
+        self.network_icon.set_tone("green" if protected else "muted")
 
     def add_message_row(self, message):
         row = QFrame()
@@ -712,15 +881,15 @@ class Window(QMainWindow):
         row.setLayout(layout)
         member = self.members.get(message.public)
         profile = self.display_profile(message.public, member) if member else Profile(message.name)
-        layout.addWidget(Avatar(33, profile), alignment=Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(Avatar(33, profile, decorations=False), alignment=Qt.AlignmentFlag.AlignTop)
         text_area = QWidget()
         content = column(text_area, spacing=2)
         heading = horizontal(spacing=10)
-        name = label(message.name)
+        name = label(message.name, elide=True)
+        name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         name.setStyleSheet("font-weight: 650;")
-        heading.addWidget(name)
+        heading.addWidget(name, 1)
         heading.addWidget(label(message.stamp, "muted"))
-        heading.addStretch()
         content.addLayout(heading)
         content.addWidget(label(message.text, wrap=True))
         layout.addWidget(text_area, 1)
@@ -899,7 +1068,7 @@ class Window(QMainWindow):
             self.set_audio("pressed", False)
 
     def audio_settings(self):
-        dialog = QDialog(self)
+        dialog = AnimatedDialog(self)
         dialog.setWindowTitle("Настройки звука")
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.setMinimumWidth(360)
@@ -967,6 +1136,7 @@ class Window(QMainWindow):
         self.speaking.clear()
         self.inspect_peer = None
         self.messages.clear()
+        self.notifications.clear()
         self.rendered_channel = None
         self.message.clear()
         self.clear_clipboard()
@@ -1001,7 +1171,14 @@ class Window(QMainWindow):
                 self.overview = False
             self.update_view()
         elif kind == "members":
+            old = self.members
             self.members = {public: Member(name, own, verified, voice) for public, name, own, verified, voice in data}
+            if old and not self.connecting and not self.leaving:
+                for public, member in self.members.items():
+                    if public not in old and not member.own:
+                        self.notifications.publish(
+                            "Участник подключился", member.name, "К комнате подключился участник.",
+                        )
             if self.session_group is not None:
                 local = next((member for member in self.members.values() if member.own), None)
                 if local and local.voice:
@@ -1035,6 +1212,10 @@ class Window(QMainWindow):
                 row.activity(speaking)
         elif kind == "chat":
             self.receive_chat(*data)
+            public, name, _, message = data
+            member = self.members.get(public)
+            if member is not None and not member.own and not self.leaving:
+                self.notifications.publish(f"{name} · новое сообщение", message, "Новое сообщение в комнате.")
         elif kind == "meter":
             self.meter.set_level(data)
             self.db.setText("−∞ дБ" if data < -65 else f"{data:.0f} дБ")
@@ -1086,6 +1267,9 @@ class Window(QMainWindow):
             self.release_ptt()
 
     def eventFilter(self, watched, event):
+        if watched is getattr(self, "workspace", None) and event.type() == QEvent.Type.Resize:
+            if hasattr(self, "reflow_timer"):
+                self.reflow_timer.start(0)
         if event.type() == QEvent.Type.Show and isinstance(watched, QDialog) and watched.parent() is self:
             self.release_ptt()
         if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and event.key() == Qt.Key.Key_F8:
@@ -1097,16 +1281,30 @@ class Window(QMainWindow):
 
     def worker_finished(self):
         self.worker_done = True
-        if self.closing:
+        if self.closing and self.fade_done:
             self.close()
 
-    def closeEvent(self, event):
+    def finish_fade(self):
+        self.fade_done = True
         if self.worker_done:
+            self.close()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "notifications"):
+            self.notifications.toast.place()
+
+    def closeEvent(self, event):
+        if self.worker_done and self.fade_done:
             self.tray.hide()
             self.clear_clipboard()
             super().closeEvent(event)
-        else:
+            return
+        event.ignore()
+        if not self.closing:
             self.closing = True
             self.release_ptt()
+            self.notifications.clear()
+            self.setEnabled(False)
             self.worker.stop()
-            event.ignore()
+            self.fade.start(0.0, 180, self.finish_fade)

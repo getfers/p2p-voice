@@ -1,9 +1,13 @@
 """Виджеты и палитра четырёхзонного интерфейса sekret."""
 
 import hashlib
+from html import escape
 from math import sin
 
-from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, QPointF, QRectF, QSize, Qt
+from PyQt6.QtCore import (
+    QByteArray, QBuffer, QEasingCurve, QIODevice, QPointF, QPropertyAnimation,
+    QRectF, QSize, Qt, pyqtProperty,
+)
 from PyQt6.QtGui import (
     QColor, QFont, QIcon, QImageReader, QLinearGradient, QPainter, QPainterPath,
     QPen, QPixmap,
@@ -12,90 +16,31 @@ from PyQt6.QtWidgets import QFrame, QLabel, QPushButton, QScrollArea, QVBoxLayou
 
 from branding import APP_NAME, HEADER_LOGO
 from models import STATUS
+from profile_effects import EffectWidget, avatar_decoration, banner_effect
+from ui_theme import GREEN, active_palette
 
 
-FOREGROUND = "#ececec"
-MUTED = "#9b9b9b"
-GREEN = "#10a37f"
+class ShortLabel(QLabel):
+    def __init__(self, text):
+        super().__init__()
+        self.setText(text)
 
-STYLE = """
-QWidget { color: #ececec; font-family: "Segoe UI"; font-size: 13px; }
-QMainWindow, QDialog, QWidget#workspace { background: #212121; }
-QWidget#titlebar, QWidget#groupRail, QWidget#navigation, QWidget#inspector { background: #171717; }
-QWidget#titlebar { border-bottom: 1px solid #383838; }
-QWidget#groupRail, QWidget#navigation { border-right: 1px solid #383838; }
-QWidget#inspector { border-left: 1px solid #383838; }
-QFrame#card, QFrame#inset { background: #2f2f2f; border: 1px solid #383838; border-radius: 14px; }
-QFrame#divider { min-height: 1px; max-height: 1px; background: #383838; border: none; }
-QLabel#muted { color: #9b9b9b; }
-QLabel#section { color: #9b9b9b; font-size: 11px; font-weight: 600; }
-QLabel#subheading { font-size: 15px; font-weight: 600; }
-QLabel#groupTitle { font-size: 22px; font-weight: 600; }
-QLabel#channelTitle { font-size: 34px; font-weight: 600; }
-QLabel#sas { font-family: "Consolas", monospace; font-size: 20px; font-weight: 700; }
-QLabel#secure, QLabel#meterLevel[active="true"] { color: #81cbb8; }
-QLabel#secure[protected="false"], QLabel#meterLevel { color: #9b9b9b; }
-QLabel#badge { background: #233c35; color: #81cbb8; border-radius: 11px; padding: 5px 9px; }
-QLabel#badge[encrypted="false"] { background: #383838; color: #b3b3b3; }
-QLabel#notice { color: #cfcfcf; }
-QPushButton, QLineEdit, QComboBox, QSpinBox {
-  background: #2f2f2f; border: 1px solid #383838; border-radius: 9px;
-  selection-background-color: #686868; selection-color: #ffffff;
-}
-QPushButton { min-height: 28px; padding: 1px 9px; font-size: 12px; font-weight: 600; }
-QPushButton:hover { border-color: #515151; background: #3b3b3b; }
-QPushButton:pressed { background: #424242; }
-QPushButton:focus, QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border-color: #737373; }
-QPushButton:disabled { color: #808080; border-color: #383838; background: #292929; }
-QPushButton:checked { background: #414141; border-color: #646464; }
-QPushButton[role="primary"] { background: #ececec; border-color: #ececec; color: #171717; }
-QPushButton[role="primary"]:hover { background: #ffffff; border-color: #ffffff; }
-QPushButton[role="primary"]:pressed { background: #d2d2d2; border-color: #d2d2d2; }
-QPushButton[role="primary"]:disabled { background: #383838; border-color: #414141; color: #8b8b8b; }
-QPushButton[role="flat"], QPushButton[role="row"] {
-  background: transparent; border: 1px solid transparent; color: #9b9b9b;
-}
-QPushButton[role="row"] { text-align: left; padding-left: 9px; }
-QPushButton[role="flat"]:hover, QPushButton[role="row"]:hover { background: #353535; color: #ececec; }
-QPushButton[role="flat"]:focus, QPushButton[role="row"]:focus { border-color: #737373; }
-QPushButton[role="row"]:checked { background: #2f2f2f; color: #ececec; border-left: 2px solid #a5a5a5; }
-QPushButton[role="flat"]:disabled { color: #808080; }
-QPushButton#microphone:checked, QPushButton#microphoneCheck:checked, QPushButton#microphoneMonitor:checked {
-  background: #263932; border: 1px solid #10a37f; color: #a2ded0;
-}
-QPushButton[role="round"] {
-  background: #262626; border: 1px solid #383838; border-radius: 14px;
-  min-height: 0; padding: 0; font-size: 17px; font-weight: 600;
-}
-QPushButton[role="round"]:hover { background: #383838; }
-QPushButton[role="round"]:checked { background: #414141; border-color: #6a6a6a; }
-QPushButton[role="round"]:focus { border-color: #818181; }
-QPushButton[role="member"] { min-height: 104px; padding: 0; background: #292929; border-radius: 13px; }
-QPushButton[role="member"]:hover { background: #343434; }
-QPushButton[role="member"][selected="true"] { border-color: #686868; }
-QPushButton[role="member"][speaking="true"] { border: 1px solid #10a37f; background: #263632; }
-QPushButton[role="presence"] { min-height: 26px; padding: 0; background: transparent; border: 1px solid transparent; }
-QPushButton[role="presence"]:hover { background: #2f2f2f; }
-QPushButton[role="presence"][speaking="true"] { border-color: #10a37f; background: #20312b; }
-QLineEdit, QComboBox, QSpinBox { min-height: 28px; padding: 2px 9px; }
-QLineEdit[readOnly="true"] { color: #d6d6d6; }
-QLineEdit:disabled { color: #858585; }
-QComboBox QAbstractItemView, QMenu {
-  background: #2f2f2f; border: 1px solid #383838; selection-background-color: #4b4b4b;
-}
-QMenu::item { padding: 6px 22px 6px 10px; }
-QMenu::item:selected { background: #454545; }
-QCheckBox { spacing: 7px; }
-QScrollArea { border: none; background: transparent; }
-QWidget#scrollBody, QWidget#scrollViewport { background: transparent; }
-QScrollBar:vertical { background: transparent; width: 7px; margin: 2px; }
-QScrollBar::handle:vertical { background: #505050; border-radius: 3px; min-height: 19px; }
-QScrollBar::add-line, QScrollBar::sub-line { height: 0px; width: 0px; }
-"""
+    def setText(self, text):
+        self.caption = text
+        self.setToolTip(f"<p>{escape(text)}</p>" if text else "")
+        self.fit_caption()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit_caption()
+
+    def fit_caption(self):
+        text = self.fontMetrics().elidedText(self.caption, Qt.TextElideMode.ElideRight, self.contentsRect().width())
+        QLabel.setText(self, text)
 
 
-def label(text="", style=None, wrap=False):
-    widget = QLabel(text)
+def label(text="", style=None, wrap=False, *, elide=False):
+    widget = ShortLabel(text) if elide else QLabel(text)
     widget.setTextFormat(Qt.TextFormat.PlainText)
     if style:
         widget.setObjectName(style)
@@ -103,20 +48,125 @@ def label(text="", style=None, wrap=False):
     return widget
 
 
-def brand_logo(height):
-    image = QPixmap(str(HEADER_LOGO))
-    if image.isNull():
-        return label(APP_NAME, "subheading")
-    widget = label(style="brandLogo")
-    widget.setPixmap(image)
-    widget.setScaledContents(True)
-    widget.setFixedSize(round(height * image.width() / image.height()), height)
-    widget.setAccessibleName(APP_NAME)
-    return widget
+class BrandLogo(QLabel):
+    def __init__(self, height):
+        super().__init__()
+        self.source = QPixmap(str(HEADER_LOGO))
+        self.setObjectName("brandLogo")
+        self.setAccessibleName(APP_NAME)
+        self.setScaledContents(True)
+        if not self.source.isNull():
+            self.setFixedSize(round(height * self.source.width() / self.source.height()), height)
+        self.refresh_theme()
+
+    def refresh_theme(self):
+        if self.source.isNull():
+            self.setText(APP_NAME)
+            return
+        image = QPixmap(self.source)
+        painter = QPainter(image)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(image.rect(), QColor(active_palette()["text"]))
+        painter.end()
+        self.setPixmap(image)
+
+
+class AnimatedButton(QPushButton):
+    def __init__(self, text, glyph=None):
+        super().__init__(text)
+        self.glyph = glyph
+        self.full_caption = None
+        self.progress = 0.0
+        self.animation = QPropertyAnimation(self, b"hoverLevel", self)
+        self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.pressed.connect(lambda: self.animate_hover(1.0, 85))
+        self.released.connect(lambda: self.animate_hover(.65 if self.underMouse() else 0.0, 135))
+
+    @pyqtProperty(float)
+    def hoverLevel(self):
+        return self.progress
+
+    @hoverLevel.setter
+    def hoverLevel(self, value):
+        self.progress = value
+        self.update()
+
+    def animate_hover(self, value, duration=145):
+        self.animation.stop()
+        self.animation.setDuration(duration)
+        self.animation.setStartValue(self.progress)
+        self.animation.setEndValue(value)
+        self.animation.start()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self.animate_hover(.65)
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self.animate_hover(0.0)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.isEnabled() or self.progress < .02:
+            return
+        palette = active_palette()
+        role = self.property("role")
+        tone = QColor(
+            "#c93e4d" if role == "closeWindow" else
+            palette["on_primary"] if role == "primary" else palette["text"]
+        )
+        tone.setAlpha(round(self.progress * (64 if role == "closeWindow" else 30)))
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(tone)
+        radius = 12 if role in ("round", "member") else 8
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), radius, radius)
+
+    def set_glyph(self, glyph):
+        self.glyph = glyph
+        self.refresh_theme()
+
+    def refresh_theme(self):
+        if self.glyph:
+            colors = active_palette()
+            tone = colors["on_primary"] if self.property("role") == "primary" else colors["text"]
+            self.setIcon(icon(self.glyph, tone))
+
+    def elide_caption(self):
+        self.full_caption = self.text()
+        self.setToolTip(f"<p>{escape(self.full_caption)}</p>")
+        self.fit_caption()
+
+    def fit_caption(self):
+        if self.full_caption is not None:
+            available = max(0, self.width() - (37 if self.glyph else 19))
+            self.setText(self.fontMetrics().elidedText(self.full_caption, Qt.TextElideMode.ElideRight, available))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit_caption()
+
+
+class Symbol(QLabel):
+    def __init__(self, name, tone="muted", size=16):
+        super().__init__()
+        self.name, self.tone, self.side = name, tone, size
+        self.setFixedSize(size, size)
+        self.refresh_theme()
+
+    def set_tone(self, tone):
+        if tone != self.tone:
+            self.tone = tone
+            self.refresh_theme()
+
+    def refresh_theme(self):
+        self.setPixmap(icon(self.name, active_palette()[self.tone]).pixmap(self.side, self.side))
 
 
 def button(text="", callback=None, *, role=None, icon_name=None, toggle=False, width=None):
-    widget = QPushButton(text)
+    widget = AnimatedButton(text, icon_name)
     widget.setCheckable(toggle)
     if role:
         widget.setProperty("role", role)
@@ -125,8 +175,8 @@ def button(text="", callback=None, *, role=None, icon_name=None, toggle=False, w
     if width is not None:
         widget.setFixedWidth(width)
     if icon_name:
-        widget.setIcon(icon(icon_name, "#171717" if role == "primary" else FOREGROUND))
         widget.setIconSize(QSize(15, 15))
+        widget.refresh_theme()
     return widget
 
 
@@ -197,16 +247,21 @@ PATHS = {
     "spark": [[(12, 2), (14, 9), (22, 12), (14, 15), (12, 22), (10, 15), (2, 12), (10, 9), (12, 2)]],
     "mask": [[(5, 8), (8, 5), (16, 5), (19, 8)], [(8, 19), (12, 22), (16, 19)]],
     "sliders": [[(3, y), (21, y)] for y in (5, 12, 19)],
+    "panel-left": [[(9, 5), (9, 19)]],
+    "panel-right": [[(15, 5), (15, 19)]],
+    "minimize": [[(6, 12), (18, 12)]],
+    "maximize": [],
+    "restore": [[(8, 7), (8, 4), (20, 4), (20, 16), (17, 16)]],
 }
 
 
-def icon(name, color=FOREGROUND):
+def icon(name, color=None):
     pixmap = QPixmap(48, 48)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.scale(2, 2)
-    pen = QPen(QColor(color), 1.65)
+    pen = QPen(QColor(color or active_palette()["text"]), 1.65)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     painter.setPen(pen)
@@ -219,6 +274,8 @@ def icon(name, color=FOREGROUND):
         "mic": [(9, 2, 6, 12, 3)], "headphones": [(3, 12, 5, 8, 2), (16, 12, 5, 8, 2)],
         "copy": [(7, 7, 13, 14, 2), (3, 3, 13, 14, 2)], "banner": [(3, 5, 18, 14, 2)],
         "radio": [(4, 7, 16, 12, 3)], "robot": [(4, 7, 16, 12, 3)], "mask": [(4, 7, 16, 12, 3)],
+        "panel-left": [(3, 4, 18, 16, 2)], "panel-right": [(3, 4, 18, 16, 2)],
+        "maximize": [(5, 5, 14, 14, 1)], "restore": [(4, 8, 12, 12, 1)],
     }
     for x, y, w, h, radius in boxes.get(name, ()):
         painter.drawRoundedRect(QRectF(x, y, w, h), radius, radius)
@@ -245,9 +302,10 @@ def avatar_image(data):
     return QPixmap()
 
 
-class Avatar(QWidget):
-    def __init__(self, side, profile, *, show_status=False, ring=False):
-        super().__init__()
+class Avatar(EffectWidget):
+    def __init__(self, side, profile, *, show_status=False, ring=False, decorations=True):
+        self.decoration = profile.decoration if decorations else "none"
+        super().__init__(self.decoration != "none")
         self.setFixedSize(side, side)
         self.profile = profile
         self.photo = avatar_image(profile.avatar)
@@ -258,7 +316,7 @@ class Avatar(QWidget):
         width = self.width()
         canvas = QPainter(self)
         canvas.setRenderHint(QPainter.RenderHint.Antialiasing)
-        margin = 3 if self.ring else 1
+        margin = max(4, round(width / 10)) if self.animated else 3 if self.ring else 1
         circle = QRectF(margin, margin, width - margin * 2, width - margin * 2)
         path = QPainterPath()
         path.addEllipse(circle)
@@ -272,26 +330,29 @@ class Avatar(QWidget):
             gradient.setColorAt(0, QColor(72 + tone, 72 + tone, 72 + tone))
             gradient.setColorAt(1, QColor(41 + tone, 41 + tone, 41 + tone))
             canvas.fillRect(circle, gradient)
-            canvas.setPen(QColor(FOREGROUND))
+            canvas.setPen(QColor("#ececec"))
             font = QFont()
             font.setBold(True)
             font.setPixelSize(round(width * .40))
             canvas.setFont(font)
             canvas.drawText(circle, Qt.AlignmentFlag.AlignCenter, self.profile.name[:1].upper())
         canvas.restore()
+        if self.animated:
+            avatar_decoration(canvas, self.decoration, width, self.phase())
         if self.ring:
             canvas.setPen(QPen(QColor(GREEN), 1.5))
             canvas.drawEllipse(QRectF(1, 1, width - 2, width - 2))
         if self.show_status:
-            status_color = {"online": "#dedede", "busy": "#969696", "invisible": "#676767"}
-            canvas.setPen(QPen(QColor("#2f2f2f"), 2))
+            colors = active_palette()
+            status_color = {"online": colors["text"], "busy": colors["muted"], "invisible": colors["disabled"]}
+            canvas.setPen(QPen(QColor(colors["card"]), 2))
             canvas.setBrush(QColor(status_color[self.profile.status]))
             canvas.drawEllipse(QPointF(width * .82, width * .82), max(3, width * .1), max(3, width * .1))
 
 
-class Banner(QWidget):
+class Banner(EffectWidget):
     def __init__(self, profile, height):
-        super().__init__()
+        super().__init__(profile.effect != "none")
         self.profile = profile
         self.setFixedHeight(height)
 
@@ -323,6 +384,8 @@ class Banner(QWidget):
                 else:
                     path.lineTo(point)
             canvas.drawPath(path)
+        if self.animated:
+            banner_effect(canvas, self.profile.effect, width, height, self.phase())
 
 
 class ProfileHeader(QWidget):
@@ -335,10 +398,10 @@ class ProfileHeader(QWidget):
         self.banner.setParent(self)
         self.avatar = Avatar(self.side, profile, show_status=True)
         self.avatar.setParent(self)
-        self.name = label(profile.name, "subheading" if not own else None)
+        self.name = label(profile.name, "subheading" if not own else None, elide=True)
         self.name.setParent(self)
         status = STATUS[profile.status] if own or edit is not None or profile.status != "invisible" else "Не в сети"
-        self.status = label(status, "muted")
+        self.status = label(status, "muted", elide=True)
         self.status.setParent(self)
         self.edit = None
         if edit is not None:
@@ -358,7 +421,6 @@ class ProfileHeader(QWidget):
         reserved = 28 if self.edit is not None else 0
         self.name.setGeometry(left, self.banner_h + 2, max(0, width - left - reserved), 19)
         self.status.setGeometry(left, self.banner_h + 22, max(0, width - left), 17)
-        self.name.setToolTip(self.name.text())
         if self.edit is not None:
             self.edit.move(width - 26, self.banner_h - 2)
 
@@ -381,6 +443,6 @@ class Meter(QWidget):
         step = self.width() / 32
         active = min(32, max(0, round((self.level + 60) / 60 * 32)))
         for index in range(32):
-            fill = "#444444" if index >= active else GREEN
+            fill = active_palette()["meter"] if index >= active else GREEN
             painter.setBrush(QColor(fill))
             painter.drawRoundedRect(QRectF(index * step, 1, max(1, step - 3), 9), 2, 2)

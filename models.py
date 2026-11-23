@@ -8,6 +8,15 @@ from crypto import b64, unb64
 
 
 STATUS = {"online": "В сети", "busy": "Не беспокоить", "invisible": "Невидимка"}
+DECORATIONS = {
+    "none": "Без рамки", "eyes": "Теневые глаза", "smoke": "Призрачный дым",
+    "neon": "Неоновый импульс", "cyber": "Кибер-кольцо", "radar": "Скан-радар",
+    "sparks": "Искры",
+}
+PROFILE_EFFECTS = {
+    "none": "Без эффекта", "shadows": "Падающие тени", "waves": "Призрачные волны",
+    "matrix": "Матрица", "aura": "Светящаяся аура",
+}
 MAX_AVATAR = 8000
 MAX_PROFILE = 11200
 MAX_CHANNELS = 12
@@ -46,13 +55,20 @@ class Profile:
     banner_first: str = DEFAULT_BANNER[0]
     banner_last: str = DEFAULT_BANNER[1]
     avatar: bytes = b""
+    decoration: str = "none"
+    effect: str = "none"
 
     def document(self):
-        return {
+        data = {
             "name": self.name, "status": self.status, "accent": self.accent,
             "banner_first": self.banner_first, "banner_last": self.banner_last,
             "avatar": b64(self.avatar),
         }
+        if self.decoration != "none":
+            data["decoration"] = self.decoration
+        if self.effect != "none":
+            data["effect"] = self.effect
+        return data
 
     @classmethod
     def read(cls, value):
@@ -69,9 +85,13 @@ class Profile:
             avatar.startswith(b"\xff\xd8\xff") and avatar.endswith(b"\xff\xd9")
         )):
             raise ValueError("Аватар должен быть в формате JPEG.")
+        decoration, effect = value.get("decoration", "none"), value.get("effect", "none")
+        if (not isinstance(decoration, str) or decoration not in DECORATIONS
+                or not isinstance(effect, str) or effect not in PROFILE_EFFECTS):
+            raise ValueError("Некорректный эффект профиля.")
         return cls(
             title(value["name"], 30, "Имя"), status, color(value["accent"]),
-            color(value["banner_first"]), color(value["banner_last"]), avatar,
+            color(value["banner_first"]), color(value["banner_last"]), avatar, decoration, effect,
         )
 
 

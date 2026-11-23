@@ -13,7 +13,7 @@ from PyQt6.QtCore import QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 from audio import Audio, DEVICES_ERRORS, devices
-from branding import APP_NAME
+from branding import APP_NAME, ASSETS
 from crypto import Identity, b64
 from network import VOICE, Room
 from ui import Window
@@ -220,6 +220,7 @@ def main():
         assets_ok = (
             not window.windowIcon().isNull() and not window.tray.icon().isNull()
             and header is not None and not header.isNull()
+            and (ASSETS / "notification.wav").is_file()
         )
         return 0 if ready and assets_ok else 1
     return app.exec()
