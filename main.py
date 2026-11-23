@@ -9,7 +9,7 @@ import threading
 sys.dont_write_bytecode = True
 
 from cryptography.exceptions import InvalidTag
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 from audio import Audio, DEVICES_ERRORS, devices
@@ -24,7 +24,7 @@ def callsign():
 
 
 class SessionWorker(QThread):
-    event = pyqtSignal(str, object)
+    session_event = pyqtSignal(str, object)
 
     def __init__(self, host, name, mode, identity, parent=None):
         super().__init__(parent)
@@ -45,7 +45,7 @@ class SessionWorker(QThread):
             if kind == "speaking":
                 public, speaking = data
                 data = (b64(public), speaking)
-            self.event.emit(kind, data)
+            self.session_event.emit(kind, data)
 
     def run(self):
         try:
@@ -53,6 +53,7 @@ class SessionWorker(QThread):
         except Exception as error:
             self.emit("ended", f"Сеанс завершён из-за ошибки ({type(error).__name__}).")
         finally:
+            self.identity.close()
             while not self.commands.empty():
                 self.commands.get_nowait()
 
@@ -130,9 +131,22 @@ def main():
     window = Window(callsign(), SessionWorker)
     window.show()
     if smoke:
-        app.processEvents()
-        window.close()
-        return 0
+        window.host()
+        ready = False
+        timer = QTimer(window)
+
+        def check_room():
+            nonlocal ready
+            if window.panel is not None and window.panel.rows:
+                ready = True
+                timer.stop()
+                window.close()
+
+        timer.timeout.connect(check_room)
+        timer.start(20)
+        QTimer.singleShot(10000, window.close)
+        app.exec()
+        return 0 if ready else 1
     return app.exec()
 
 

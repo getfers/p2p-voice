@@ -493,7 +493,7 @@ class Window(QMainWindow):
         self.panel.leave.clicked.connect(self.leave_room)
         self.stack.addWidget(self.panel)
         self.stack.setCurrentWidget(self.panel)
-        self.worker.event.connect(self.dispatch)
+        self.worker.session_event.connect(self.dispatch)
         self.worker.finished.connect(self.finished)
         self.worker.start()
 
