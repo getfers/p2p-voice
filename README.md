@@ -1,8 +1,10 @@
-# Эфир
+# sekret
 
 Десктопные голосовые комнаты и чат без учётных записей и центрального сервера приложения. Хост создаёт комнату на своём компьютере и ретранслирует зашифрованные пакеты между участниками. В комнате может быть до восьми человек, включая хоста.
 
 ## Запуск
+
+В Windows x64 скачайте и запустите `sekret.exe`. Иконка доступна в системном трее, если его поддерживает окружение рабочего стола. Нажатие на иконку открывает окно, а пункт «Выход» завершает приложение. [Сборки GitHub Releases](https://github.com/getfers/p2p-voice/releases/latest)
 
 Понадобится Python 3.11 или новее. На Linux установите PortAudio и библиотеки для Qt/X11 через пакетный менеджер. В Debian и Ubuntu это `libportaudio2`, `libxcb-cursor0` и `libxkbcommon-x11-0`. На macOS и Windows разрешите приложению использовать микрофон в настройках ОС.
 
@@ -38,7 +40,7 @@ python3 -m venv .venv
 
 Карандаш, «Баннер» и «Цвет» в карточке «Мой профиль» открывают редактор. Можно сменить ник, статус, аватар и два цвета градиента. Аватар обрезается по центру и передаётся как JPEG 128×128. «Невидимка» отображается для собеседников как «Не в сети». Список подключённых к комнате всё равно показывает участника.
 
-По умолчанию включён режим амнезии, профиль хранится в памяти. Снимите галочку и сохраните профиль, если хотите использовать его после перезапуска. Повторное включение амнезии удаляет профиль из каталога конфигурации приложения. Группы, сообщения, настройки звонка и ключи остаются в памяти.
+По умолчанию включён режим амнезии, профиль хранится в памяти. Снимите галочку и сохраните профиль, если хотите использовать его после перезапуска. Ранее сохранённый профиль доступен и после переименования. Включение амнезии удаляет сохранённый профиль из обоих каталогов конфигурации. Группы, сообщения, настройки звонка и ключи остаются в памяти.
 
 «Проверка микрофона» включает локальную шкалу в дБFS. «Прослушать себя» выводит обработанный звук на выбранное устройство. Используйте наушники. Выбранный эффект применяется и к голосу в комнате. Настройки студии позволяют выбрать микрофон и выход, включить шумовой порог и настроить Push-to-Talk.
 
@@ -57,7 +59,7 @@ python3 -m venv .venv
 Для режима Tor запустите Tor на обеих машинах. Хост создаёт onion-сервис, который направляет TCP на локальный порт приложения. Пример настроек хоста в `torrc`:
 
 ```text
-HiddenServiceDir /path/to/efir-onion
+HiddenServiceDir /path/to/sekret-onion
 HiddenServicePort 17840 127.0.0.1:17840
 ```
 
@@ -79,12 +81,12 @@ $python = '.\.venv\Scripts\python.exe'
 $savedPath = $env:Path
 try {
     $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
-    & $python -m PyInstaller --noconfirm --clean --noupx --onefile --windowed --name Efir --collect-all av --recursive-copy-metadata aiortc --recursive-copy-metadata PyQt6 --recursive-copy-metadata sounddevice --recursive-copy-metadata scipy main.py
+    & $python -m PyInstaller --noconfirm --clean --noupx --onefile --windowed --name sekret --icon=assets/app_icon.ico --add-data "assets/app_icon.png:assets" --add-data "assets/logo_header.png:assets" --collect-all av --recursive-copy-metadata aiortc --recursive-copy-metadata PyQt6 --recursive-copy-metadata sounddevice --recursive-copy-metadata scipy main.py
 } finally {
     $env:Path = $savedPath
 }
 ```
 
-Готовый файл находится в `dist/Efir.exe`. PyInstaller распаковывает библиотеки однофайловой сборки во временный каталог при запуске. GitHub Actions после каждого пуша в `main` проверяет запуск, собирает Windows x64 и публикует `Efir.exe` вместе с SHA-256 на странице [Releases](https://github.com/getfers/p2p-voice/releases). Для сборки с собственными библиотеками Qt используйте исходники и команду PyInstaller выше. Пакет PyQt6 можно собрать с выбранной версией Qt по официальным инструкциям.
+Готовый файл находится в `dist/sekret.exe`. PyInstaller встраивает иконку в исполняемый файл и включает оба PNG в сборку. При запуске библиотеки и ресурсы распаковываются во временный каталог. GitHub Actions после каждого пуша в `main` проверяет запуск, собирает Windows x64 и публикует `sekret.exe` вместе с SHA-256. Для сборки с собственными библиотеками Qt используйте исходники и команду PyInstaller выше. Пакет PyQt6 можно собрать с выбранной версией Qt по официальным инструкциям. [GitHub Releases](https://github.com/getfers/p2p-voice/releases)
 
 Лицензия исходного кода **GPL-3.0-only**. Библиотеки распространяются по своим лицензиям. Исходники и лицензионная информация доступны у авторов. [GPLv3](LICENSE) · [PyQt6](https://www.riverbankcomputing.com/software/pyqt/download) · [Qt](https://code.qt.io/cgit/qt/qtbase.git/) · [aiortc](https://github.com/aiortc/aiortc) · [PyAV и FFmpeg](https://github.com/PyAV-Org/PyAV) · [FFmpeg](https://ffmpeg.org/download.html) · [PortAudio](https://github.com/PortAudio/portaudio) · [sounddevice](https://github.com/spatialaudio/python-sounddevice) · [cryptography](https://github.com/pyca/cryptography)

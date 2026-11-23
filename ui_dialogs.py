@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QLineEdit, QSpinBox, QWidget,
 )
 
+from branding import APP_NAME
 from crypto import MAX_TOKEN, json_bytes
 from models import MAX_AVATAR, MAX_PROFILE, Profile, STATUS, title
 from network import DIRECT, PROXY
@@ -30,19 +31,25 @@ def field(placeholder="", *, readonly=False, limit=MAX_TOKEN):
 
 class ProfileStore:
     def __init__(self, ephemeral=False, path=None):
-        folder = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation)
-        self.path = None if ephemeral else (path or Path(folder) / "profile.json")
+        folder = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation))
+        self.path = None if ephemeral else (path or folder / "profile.json")
+        # Qt выводит имя каталога из названия приложения. Сохранённый профиль доступен после ребрендинга.
+        self.previous_path = (
+            folder.with_name("Эфир") / "profile.json"
+            if not ephemeral and path is None and folder.name == APP_NAME else None
+        )
 
     def load(self, fallback):
-        if self.path is None:
-            return fallback, True
-        try:
-            with self.path.open("rb") as stream:
-                data = stream.read(MAX_PROFILE + 1)
-            if len(data) <= MAX_PROFILE:
-                return Profile.read(json.loads(data)), False
-        except (OSError, ValueError, TypeError, KeyError, RecursionError):
-            pass
+        for path in (self.path, self.previous_path):
+            if path is None:
+                continue
+            try:
+                with path.open("rb") as stream:
+                    data = stream.read(MAX_PROFILE + 1)
+                if len(data) <= MAX_PROFILE:
+                    return Profile.read(json.loads(data)), False
+            except (OSError, ValueError, TypeError, KeyError, RecursionError):
+                continue
         return fallback, True
 
     def save(self, profile, ephemeral):
@@ -50,6 +57,8 @@ class ProfileStore:
             return
         if ephemeral:
             self.path.unlink(missing_ok=True)
+            if self.previous_path is not None:
+                self.previous_path.unlink(missing_ok=True)
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         file = QSaveFile(str(self.path))

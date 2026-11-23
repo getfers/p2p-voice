@@ -13,6 +13,7 @@ from PyQt6.QtCore import QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 from audio import Audio, DEVICES_ERRORS, devices
+from branding import APP_NAME
 from crypto import Identity, b64
 from network import VOICE, Room
 from ui import Window
@@ -189,9 +190,15 @@ class SessionWorker(QThread):
 
 def main():
     smoke = "--self-test" in sys.argv
+    if sys.platform == "win32" and not smoke:
+        from ctypes import c_wchar_p, windll
+
+        windll.shell32.SetCurrentProcessExplicitAppUserModelID(c_wchar_p(f"getfers.{APP_NAME}"))
     app = QApplication([sys.argv[0], "-platform", "offscreen"] if smoke else sys.argv)
-    app.setApplicationName("Эфир")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
     window = Window(callsign(), SessionWorker, ephemeral=smoke)
+    app.setWindowIcon(window.windowIcon())
     window.show()
     if smoke:
         window.host_room(invite=False)
@@ -209,7 +216,12 @@ def main():
         timer.start(20)
         QTimer.singleShot(10000, window.close)
         app.exec()
-        return 0 if ready else 1
+        header = window.header_logo.pixmap()
+        assets_ok = (
+            not window.windowIcon().isNull() and not window.tray.icon().isNull()
+            and header is not None and not header.isNull()
+        )
+        return 0 if ready and assets_ok else 1
     return app.exec()
 
 

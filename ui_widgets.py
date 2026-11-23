@@ -1,4 +1,4 @@
-"""Виджеты и палитра четырёхзонного интерфейса «Эфира»."""
+"""Виджеты и палитра четырёхзонного интерфейса sekret."""
 
 import hashlib
 from math import sin
@@ -10,77 +10,86 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QFrame, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
+from branding import APP_NAME, HEADER_LOGO
 from models import STATUS
 
 
-ACCENT = "#5865f2"
-FOREGROUND = "#f2f3f5"
-MUTED = "#b5bac5"
-DIM = "#949ba4"
-GREEN = "#53d5a1"
+FOREGROUND = "#ececec"
+MUTED = "#9b9b9b"
+GREEN = "#10a37f"
 
 STYLE = """
-QWidget { color: #f2f3f5; font-family: "Segoe UI"; font-size: 13px; }
-QMainWindow, QDialog, QMenu, QWidget#workspace { background: #313338; }
-QWidget#titlebar, QWidget#groupRail { background: #1e1f22; }
-QWidget#navigation, QWidget#inspector { background: #2b2d31; }
-QWidget#navigation, QWidget#inspector { border-right: 1px solid #383a40; }
-QFrame#card { background: #2b2d31; border: 1px solid #41434b; border-radius: 9px; }
-QFrame#inset { background: #292b2f; border: 1px solid #41434b; border-radius: 9px; }
-QFrame#divider { min-height: 1px; max-height: 1px; background: #41434b; border: none; }
-QLabel#muted { color: #b5bac5; }
-QLabel#section { color: #a8adb9; font-size: 11px; font-weight: 700; }
-QLabel#subheading { font-size: 15px; font-weight: 650; }
-QLabel#groupTitle { font-size: 23px; font-weight: 650; }
-QLabel#channelTitle { font-size: 35px; font-weight: 700; }
+QWidget { color: #ececec; font-family: "Segoe UI"; font-size: 13px; }
+QMainWindow, QDialog, QWidget#workspace { background: #212121; }
+QWidget#titlebar, QWidget#groupRail, QWidget#navigation, QWidget#inspector { background: #171717; }
+QWidget#titlebar { border-bottom: 1px solid #383838; }
+QWidget#groupRail, QWidget#navigation { border-right: 1px solid #383838; }
+QWidget#inspector { border-left: 1px solid #383838; }
+QFrame#card, QFrame#inset { background: #2f2f2f; border: 1px solid #383838; border-radius: 14px; }
+QFrame#divider { min-height: 1px; max-height: 1px; background: #383838; border: none; }
+QLabel#muted { color: #9b9b9b; }
+QLabel#section { color: #9b9b9b; font-size: 11px; font-weight: 600; }
+QLabel#subheading { font-size: 15px; font-weight: 600; }
+QLabel#groupTitle { font-size: 22px; font-weight: 600; }
+QLabel#channelTitle { font-size: 34px; font-weight: 600; }
 QLabel#sas { font-family: "Consolas", monospace; font-size: 20px; font-weight: 700; }
-QLabel#secure { color: #67dcae; }
-QLabel#badge { background: #253d35; color: #72e0b5; border-radius: 9px; padding: 4px 8px; }
-QLabel#badge[encrypted="false"] { background: #303238; color: #a7aebb; }
-QLabel#notice { color: #c6cbee; }
+QLabel#secure, QLabel#meterLevel[active="true"] { color: #81cbb8; }
+QLabel#secure[protected="false"], QLabel#meterLevel { color: #9b9b9b; }
+QLabel#badge { background: #233c35; color: #81cbb8; border-radius: 11px; padding: 5px 9px; }
+QLabel#badge[encrypted="false"] { background: #383838; color: #b3b3b3; }
+QLabel#notice { color: #cfcfcf; }
 QPushButton, QLineEdit, QComboBox, QSpinBox {
-  background: #242529; border: 1px solid #42454d; border-radius: 7px;
-  selection-background-color: #5865f2;
+  background: #2f2f2f; border: 1px solid #383838; border-radius: 9px;
+  selection-background-color: #686868; selection-color: #ffffff;
 }
-QPushButton { min-height: 28px; padding: 1px 8px; font-size: 12px; font-weight: 600; }
-QPushButton:hover { border-color: #777de6; background: #36394b; }
-QPushButton:focus, QLineEdit:focus, QComboBox:focus { border-color: #8591ff; }
-QPushButton:disabled { color: #868d98; border-color: #404249; background: #27282d; }
-QPushButton:checked { background: #3d4472; border-color: #606ccc; }
-QPushButton[role="primary"] { background: #5865f2; border-color: #5865f2; color: white; }
-QPushButton[role="primary"]:hover { background: #6875ff; }
-QPushButton[role="primary"]:disabled { background: #393d5a; border-color: #454a6a; color: #a4a9be; }
+QPushButton { min-height: 28px; padding: 1px 9px; font-size: 12px; font-weight: 600; }
+QPushButton:hover { border-color: #515151; background: #3b3b3b; }
+QPushButton:pressed { background: #424242; }
+QPushButton:focus, QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border-color: #737373; }
+QPushButton:disabled { color: #808080; border-color: #383838; background: #292929; }
+QPushButton:checked { background: #414141; border-color: #646464; }
+QPushButton[role="primary"] { background: #ececec; border-color: #ececec; color: #171717; }
+QPushButton[role="primary"]:hover { background: #ffffff; border-color: #ffffff; }
+QPushButton[role="primary"]:pressed { background: #d2d2d2; border-color: #d2d2d2; }
+QPushButton[role="primary"]:disabled { background: #383838; border-color: #414141; color: #8b8b8b; }
 QPushButton[role="flat"], QPushButton[role="row"] {
-  background: transparent; border: 1px solid transparent; color: #b5bac5;
+  background: transparent; border: 1px solid transparent; color: #9b9b9b;
 }
-QPushButton[role="row"] { text-align: left; padding-left: 8px; }
-QPushButton[role="row"]:checked { background: #3c4265; color: #f2f3f5; border-left: 3px solid #6975ff; }
-QPushButton[role="flat"]:hover, QPushButton[role="row"]:hover { background: #373a44; color: #f2f3f5; }
-QPushButton[role="flat"]:disabled { color: #858b95; }
+QPushButton[role="row"] { text-align: left; padding-left: 9px; }
+QPushButton[role="flat"]:hover, QPushButton[role="row"]:hover { background: #353535; color: #ececec; }
+QPushButton[role="flat"]:focus, QPushButton[role="row"]:focus { border-color: #737373; }
+QPushButton[role="row"]:checked { background: #2f2f2f; color: #ececec; border-left: 2px solid #a5a5a5; }
+QPushButton[role="flat"]:disabled { color: #808080; }
+QPushButton#microphone:checked, QPushButton#microphoneCheck:checked, QPushButton#microphoneMonitor:checked {
+  background: #263932; border: 1px solid #10a37f; color: #a2ded0;
+}
 QPushButton[role="round"] {
-  background: #303238; border: 1px solid transparent; border-radius: 22px;
-  min-height: 0; padding: 0; font-size: 17px; font-weight: 700;
+  background: #262626; border: 1px solid #383838; border-radius: 14px;
+  min-height: 0; padding: 0; font-size: 17px; font-weight: 600;
 }
-QPushButton[role="round"]:hover, QPushButton[role="round"]:checked { background: #5865f2; color: white; }
-QPushButton[role="member"] { min-height: 104px; padding: 0; background: #242529; }
-QPushButton[role="member"][speaking="true"] { border: 1px solid #53d5a1; background: #263630; }
-QPushButton[role="member"][selected="true"] { border-color: #8992fa; }
-QPushButton[role="member"][speaking="true"][selected="true"] { border-color: #53d5a1; }
+QPushButton[role="round"]:hover { background: #383838; }
+QPushButton[role="round"]:checked { background: #414141; border-color: #6a6a6a; }
+QPushButton[role="round"]:focus { border-color: #818181; }
+QPushButton[role="member"] { min-height: 104px; padding: 0; background: #292929; border-radius: 13px; }
+QPushButton[role="member"]:hover { background: #343434; }
+QPushButton[role="member"][selected="true"] { border-color: #686868; }
+QPushButton[role="member"][speaking="true"] { border: 1px solid #10a37f; background: #263632; }
 QPushButton[role="presence"] { min-height: 26px; padding: 0; background: transparent; border: 1px solid transparent; }
-QPushButton[role="presence"]:hover { background: #393c47; }
-QPushButton[role="presence"][speaking="true"] { border-color: #4aae8b; background: #293833; }
-QLineEdit, QComboBox, QSpinBox { min-height: 28px; padding: 2px 7px; }
-QLineEdit[readOnly="true"] { color: #cbd0f8; }
+QPushButton[role="presence"]:hover { background: #2f2f2f; }
+QPushButton[role="presence"][speaking="true"] { border-color: #10a37f; background: #20312b; }
+QLineEdit, QComboBox, QSpinBox { min-height: 28px; padding: 2px 9px; }
+QLineEdit[readOnly="true"] { color: #d6d6d6; }
+QLineEdit:disabled { color: #858585; }
 QComboBox QAbstractItemView, QMenu {
-  background: #2b2d31; border: 1px solid #464950; selection-background-color: #414b93;
+  background: #2f2f2f; border: 1px solid #383838; selection-background-color: #4b4b4b;
 }
 QMenu::item { padding: 6px 22px 6px 10px; }
-QMenu::item:selected { background: #414b93; }
+QMenu::item:selected { background: #454545; }
 QCheckBox { spacing: 7px; }
 QScrollArea { border: none; background: transparent; }
-QWidget#scrollBody { background: transparent; }
+QWidget#scrollBody, QWidget#scrollViewport { background: transparent; }
 QScrollBar:vertical { background: transparent; width: 7px; margin: 2px; }
-QScrollBar::handle:vertical { background: #4b4e57; border-radius: 3px; min-height: 19px; }
+QScrollBar::handle:vertical { background: #505050; border-radius: 3px; min-height: 19px; }
 QScrollBar::add-line, QScrollBar::sub-line { height: 0px; width: 0px; }
 """
 
@@ -94,6 +103,18 @@ def label(text="", style=None, wrap=False):
     return widget
 
 
+def brand_logo(height):
+    image = QPixmap(str(HEADER_LOGO))
+    if image.isNull():
+        return label(APP_NAME, "subheading")
+    widget = label(style="brandLogo")
+    widget.setPixmap(image)
+    widget.setScaledContents(True)
+    widget.setFixedSize(round(height * image.width() / image.height()), height)
+    widget.setAccessibleName(APP_NAME)
+    return widget
+
+
 def button(text="", callback=None, *, role=None, icon_name=None, toggle=False, width=None):
     widget = QPushButton(text)
     widget.setCheckable(toggle)
@@ -104,7 +125,7 @@ def button(text="", callback=None, *, role=None, icon_name=None, toggle=False, w
     if width is not None:
         widget.setFixedWidth(width)
     if icon_name:
-        widget.setIcon(icon(icon_name))
+        widget.setIcon(icon(icon_name, "#171717" if role == "primary" else FOREGROUND))
         widget.setIconSize(QSize(15, 15))
     return widget
 
@@ -134,7 +155,7 @@ def scroll_area():
     view = QScrollArea()
     view.setWidgetResizable(True)
     view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    view.viewport().setStyleSheet("background: transparent")
+    view.viewport().setObjectName("scrollViewport")
     body = QWidget()
     body.setObjectName("scrollBody")
     view.setWidget(body)
@@ -246,10 +267,10 @@ class Avatar(QWidget):
         if not self.photo.isNull():
             canvas.drawPixmap(circle, self.photo, QRectF(self.photo.rect()))
         else:
-            hue = int.from_bytes(hashlib.blake2s(self.profile.name.encode(), digest_size=2).digest(), "big") % 360
+            tone = hashlib.blake2s(self.profile.name.encode(), digest_size=1).digest()[0] % 33
             gradient = QLinearGradient(0, 0, width, width)
-            gradient.setColorAt(0, QColor.fromHsv(hue, 120, 170))
-            gradient.setColorAt(1, QColor.fromHsv((hue + 45) % 360, 165, 100))
+            gradient.setColorAt(0, QColor(72 + tone, 72 + tone, 72 + tone))
+            gradient.setColorAt(1, QColor(41 + tone, 41 + tone, 41 + tone))
             canvas.fillRect(circle, gradient)
             canvas.setPen(QColor(FOREGROUND))
             font = QFont()
@@ -262,8 +283,8 @@ class Avatar(QWidget):
             canvas.setPen(QPen(QColor(GREEN), 1.5))
             canvas.drawEllipse(QRectF(1, 1, width - 2, width - 2))
         if self.show_status:
-            status_color = {"online": GREEN, "busy": "#ed5e6d", "invisible": "#878e99"}
-            canvas.setPen(QPen(QColor("#2b2d31"), 2))
+            status_color = {"online": "#dedede", "busy": "#969696", "invisible": "#676767"}
+            canvas.setPen(QPen(QColor("#2f2f2f"), 2))
             canvas.setBrush(QColor(status_color[self.profile.status]))
             canvas.drawEllipse(QPointF(width * .82, width * .82), max(3, width * .1), max(3, width * .1))
 
@@ -360,6 +381,6 @@ class Meter(QWidget):
         step = self.width() / 32
         active = min(32, max(0, round((self.level + 60) / 60 * 32)))
         for index in range(32):
-            fill = "#42454e" if index >= active else (GREEN if index < 23 else "#a69bff")
+            fill = "#444444" if index >= active else GREEN
             painter.setBrush(QColor(fill))
             painter.drawRoundedRect(QRectF(index * step, 1, max(1, step - 3), 9), 2, 2)

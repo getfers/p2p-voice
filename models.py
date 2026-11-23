@@ -12,7 +12,7 @@ MAX_AVATAR = 8000
 MAX_PROFILE = 11200
 MAX_CHANNELS = 12
 ID_BYTES = 8
-DEFAULT_BANNER = ("#264a52", "#735887")
+DEFAULT_BANNER = ("#292929", "#4b4b4b")
 COLOR_PATTERN = re.compile(r"#[0-9a-fA-F]{6}")
 
 
@@ -42,7 +42,7 @@ def color(value):
 class Profile:
     name: str
     status: str = "online"
-    accent: str = "#5865f2"
+    accent: str = "#c5c5c5"
     banner_first: str = DEFAULT_BANNER[0]
     banner_last: str = DEFAULT_BANNER[1]
     avatar: bytes = b""

@@ -16,6 +16,8 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from branding import APP_NAME
+
 
 PROTOCOL = b"p2p-voice/v2"
 TOKEN_VERSION = "2."
@@ -68,7 +70,7 @@ def seal_document(kind, document, key):
 def open_document(kind, token, key):
     prefix = kind.decode("ascii") + TOKEN_VERSION
     if token.startswith(kind.decode("ascii") + "1."):
-        raise ValueError("Для приглашений нового формата обновите «Эфир» на обоих компьютерах.")
+        raise ValueError(f"Для приглашений нового формата обновите {APP_NAME} на обоих компьютерах.")
     if len(token) > MAX_TOKEN or not token.startswith(prefix):
         raise ValueError("Неверный тип или размер токена.")
     raw = unb64(token[len(prefix):])

@@ -30,13 +30,13 @@ jobs:
         run: |
           $python = (Get-Command python).Source
           $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
-          & $python -m PyInstaller --noconfirm --clean --noupx --onefile --windowed --name Efir --collect-all av --recursive-copy-metadata aiortc --recursive-copy-metadata PyQt6 --recursive-copy-metadata sounddevice --recursive-copy-metadata scipy main.py
+          & $python -m PyInstaller --noconfirm --clean --noupx --onefile --windowed --name sekret --icon=assets/app_icon.ico --add-data "assets/app_icon.png:assets" --add-data "assets/logo_header.png:assets" --collect-all av --recursive-copy-metadata aiortc --recursive-copy-metadata PyQt6 --recursive-copy-metadata sounddevice --recursive-copy-metadata scipy main.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $exe = Resolve-Path dist/Efir.exe
-          $process = Start-Process -FilePath $exe -ArgumentList '--self-test' -WindowStyle Hidden -Wait -PassThru
+          $exe = Resolve-Path dist/sekret.exe
+          $process = Start-Process -FilePath $exe -ArgumentList '--self-test' -WorkingDirectory $env:RUNNER_TEMP -WindowStyle Hidden -Wait -PassThru
           if ($process.ExitCode -ne 0) { exit $process.ExitCode }
           $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
-          "$sha256 *Efir.exe" | Set-Content -Encoding ascii dist/Efir.exe.sha256
+          "$sha256 *sekret.exe" | Set-Content -Encoding ascii dist/sekret.exe.sha256
       - name: Publish on GitHub Releases
         env:
           GH_TOKEN: ${{ github.token }}
@@ -47,10 +47,10 @@ jobs:
 
           Build instructions and dependency source links: https://github.com/$env:GITHUB_REPOSITORY/blob/$env:GITHUB_SHA/README.md
           "@
-          $assets = @('dist/Efir.exe', 'dist/Efir.exe.sha256', 'LICENSE')
+          $assets = @('dist/sekret.exe', 'dist/sekret.exe.sha256', 'LICENSE')
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @assets --clobber --repo $env:GITHUB_REPOSITORY
           } else {
-            gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Эфир · сборка $env:GITHUB_RUN_NUMBER" --notes $notes
+            gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "sekret · сборка $env:GITHUB_RUN_NUMBER" --notes $notes
           }
