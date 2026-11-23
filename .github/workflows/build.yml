@@ -1,0 +1,56 @@
+name: Windows release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Verify protocol and GUI
+        run: |
+          python -B -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B main.py --self-test
+      - name: Build and smoke-test the executable
+        run: |
+          $python = (Get-Command python).Source
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
+          & $python -m PyInstaller --noconfirm --clean --noupx --onefile --windowed --name Efir --collect-all av --recursive-copy-metadata aiortc --recursive-copy-metadata PyQt6 --recursive-copy-metadata sounddevice main.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = Resolve-Path dist/Efir.exe
+          $process = Start-Process -FilePath $exe -ArgumentList '--self-test' -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { exit $process.ExitCode }
+          $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
+          "$sha256 *Efir.exe" | Set-Content -Encoding ascii dist/Efir.exe.sha256
+      - name: Publish on GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "build-$($env:GITHUB_RUN_NUMBER)-$($env:GITHUB_SHA.Substring(0, 8))"
+          $notes = @"
+          Windows x64. Commit: $env:GITHUB_SHA
+
+          Build instructions and dependency source links: https://github.com/$env:GITHUB_REPOSITORY/blob/$env:GITHUB_SHA/README.md
+          "@
+          $assets = @('dist/Efir.exe', 'dist/Efir.exe.sha256', 'LICENSE')
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber --repo $env:GITHUB_REPOSITORY
+          } else {
+            gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Эфир · сборка $env:GITHUB_RUN_NUMBER" --notes $notes
+          }
