@@ -93,6 +93,7 @@ class Notifications:
     def __init__(self, window, tray):
         self.window, self.tray = window, tray
         self.sound_enabled = True
+        self.toast_enabled = True
         self.last_sound = -1.0
         self.last_native = -1.0
         self.pending = None
@@ -106,10 +107,11 @@ class Notifications:
         body = " ".join(body.split())
         if len(body) > 145:
             body = body[:142].rstrip() + "…"
-        if self.window.isMinimized():
-            self.pending = (heading, body)
-        else:
-            self.toast.present(heading, body)
+        if self.toast_enabled:
+            if self.window.isMinimized():
+                self.pending = (heading, body)
+            else:
+                self.toast.present(heading, body)
         now = time.monotonic()
         if self.sound_enabled and now - self.last_sound >= .55:
             self.sound.play()
@@ -129,6 +131,12 @@ class Notifications:
         self.sound_enabled = enabled
         if not enabled:
             self.sound.stop()
+
+    def set_toasts(self, enabled):
+        self.toast_enabled = enabled
+        if not enabled:
+            self.pending = None
+            self.toast.clear()
 
     def clear(self):
         self.pending = None

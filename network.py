@@ -8,32 +8,47 @@ import struct
 import time
 from dataclasses import dataclass
 
-from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 from aiortc import sdp as rtc_sdp
+from av.error import FFmpegError
 from cryptography.exceptions import InvalidTag
 
 from crypto import (
     MAX_TOKEN, Identity, b64, json_bytes, new_invite_key, open_document, seal_document,
     unb64, wipe,
 )
+from ice import gathered_description
 from models import Group, ID_BYTES, MAX_PROFILE, Profile, read_id
+from screen_media import CHUNK, STREAM_ID, VIDEO_HEADER, ScreenReceiver, video_chunks
 
 
 STUN = "stun"
 DIRECT = "direct"
 PROXY = "proxy"
-ICE_SERVER = "stun:stun.l.google.com:19302"
 INVITE_SECONDS = 600
 MAX_USERS = 8
 MAX_IDENTITIES = 64
 MAX_FRAME = MAX_TOKEN + 1
-CONTROL, VOICE = 0, 1
+CONTROL, VOICE, VIDEO = 0, 1, 2
 ROSTER, PAYLOAD = b"R", b"P"
 COMMIT, REVEAL, CONFIRM, TEXT = b"B", b"N", b"V", b"M"
 PROFILE, MOVE, ADD_CHANNEL = b"U", b"J", b"Q"
+SCREEN_START, SCREEN_STOP = b"S", b"X"
 VOICE_BYTES = 640
 CHAT_BYTES = 4096
 DATA_ERRORS = (ValueError, TypeError, KeyError, OverflowError, RecursionError, InvalidTag)
+
+
+def read_invitation(token, key):
+    offer = open_document(b"invite", token, key)
+    mode = offer.get("mode")
+    if mode not in (STUN, DIRECT, PROXY):
+        raise ValueError("Приглашение содержит неизвестный режим сети.")
+    if type(offer.get("expires")) is not int or offer["expires"] < time.time():
+        raise ValueError("Срок действия приглашения истёк.")
+    if "stun" in offer and (type(offer["stun"]) is not bool or offer["stun"] != (mode == STUN)):
+        raise ValueError("В приглашении противоречивые настройки STUN.")
+    return offer
 
 
 def endpoint(value, numeric=False):
@@ -78,7 +93,10 @@ def usable_sdp(value, mode, advertised=""):
         raise ValueError("В SDP нет доступных UDP-адресов. Проверьте сетевые интерфейсы.")
     if advertised:
         host, port = endpoint(advertised, numeric=True)
-        candidate = candidates[0]
+        version = ipaddress.ip_address(host).version
+        candidate = next((item for item in candidates if ipaddress.ip_address(item.ip).version == version), None)
+        if candidate is None:
+            raise ValueError("Для внешнего адреса нет подходящего локального интерфейса IPv4 или IPv6.")
         candidate.ip, candidate.port = host, port
         media.host, media.port = host, port
         candidates = [candidate]
@@ -162,7 +180,7 @@ class Link:
         self.deadline = time.monotonic() + 35
 
     def attach(self, channel):
-        index = {"control": CONTROL, "voice": VOICE}.get(channel.label)
+        index = {"control": CONTROL, "voice": VOICE, "screen": VIDEO}.get(channel.label)
         if index is None or index in self.channels:
             channel.close()
             return
@@ -170,7 +188,10 @@ class Link:
 
         @channel.on("open")
         def opened():
-            self.check_ready()
+            if index == VIDEO:
+                self.room.show_screen_access()
+            else:
+                self.check_ready()
 
         @channel.on("message")
         def received(packet):
@@ -178,7 +199,11 @@ class Link:
 
         @channel.on("close")
         def closed():
-            self.room.spawn(self.room.drop(self))
+            if index == VIDEO:
+                if not self.room.closed:
+                    self.room.show_screen_access()
+            else:
+                self.room.spawn(self.room.drop(self))
 
         self.check_ready()
 
@@ -186,10 +211,19 @@ class Link:
         if self.closed or self.active or self.secure is None:
             return
         if self.writer is not None or (
-            len(self.channels) == 2 and all(dc.readyState == "open" for dc in self.channels.values())
+            all(channel in self.channels and self.channels[channel].readyState == "open"
+                for channel in (CONTROL, VOICE))
         ):
             self.active = True
             self.room.link_ready(self)
+
+    def enable_screen(self):
+        self.attach(self.pc.createDataChannel("screen", ordered=False, maxRetransmits=0,
+                                              negotiated=True, id=1000))
+
+    def screen_ready(self):
+        channel = self.channels.get(VIDEO)
+        return self.active and channel is not None and channel.readyState == "open"
 
     def begin_stream(self, reader, writer):
         self.writer = writer
@@ -214,11 +248,13 @@ class Link:
         if self.writer is not None:
             pending = self.writer.transport.get_write_buffer_size()
         else:
-            data_channel = self.channels[channel]
-            if data_channel.readyState != "open":
+            data_channel = self.channels.get(channel)
+            if data_channel is None or data_channel.readyState != "open":
                 return
             pending = data_channel.bufferedAmount
         if channel == VOICE and pending > 2048:
+            return
+        if channel == VIDEO and pending > 90_000:
             return
         if pending > 131072:
             self.room.spawn(self.room.drop(self))
@@ -284,6 +320,11 @@ class Room:
         self.tasks = set()
         self.closed = False
         self.relay = None
+        self.screen_stream = 0
+        self.screen_sequence = 0
+        self.screen_sharing = False
+        self.screen_targets = set()
+        self.screen_receivers = {}
 
     def spawn(self, coroutine):
         task = asyncio.create_task(coroutine)
@@ -292,13 +333,17 @@ class Room:
         return task
 
     def new_webrtc(self, host):
-        servers = [RTCIceServer(ICE_SERVER)] if self.mode == STUN else []
-        link = Link(self, RTCPeerConnection(RTCConfiguration(iceServers=servers)))
+        link = Link(self, RTCPeerConnection(RTCConfiguration(iceServers=[])))
         if host:
             link.attach(link.pc.createDataChannel("control"))
             link.attach(link.pc.createDataChannel("voice", ordered=False, maxRetransmits=0))
         else:
-            link.pc.on("datachannel", link.attach)
+            @link.pc.on("datachannel")
+            def data_channel(channel):
+                if channel.label in ("control", "voice"):
+                    link.attach(channel)
+                else:
+                    channel.close()
 
         @link.pc.on("connectionstatechange")
         def changed():
@@ -306,6 +351,16 @@ class Room:
                 self.spawn(self.drop(link))
 
         return link
+
+    async def local_sdp(self, pc, description):
+        raw = await gathered_description(pc, description, self.mode == STUN)
+        details = usable_sdp(raw, self.mode)
+        if self.mode == STUN and not any(
+            candidate.type == "srflx"
+            for candidate in rtc_sdp.SessionDescription.parse(details).media[0].ice_candidates
+        ):
+            self.emit("ice_notice", "STUN не вернул внешний UDP-адрес. Приглашение может работать только по локальному адресу или VPN.")
+        return details
 
     async def invite(self, advertised, local_port):
         if not self.host or self.closed or self.pending is not None:
@@ -315,7 +370,7 @@ class Room:
         expires = int(time.time()) + INVITE_SECONDS
         pending = self.pending = Invitation("", new_invite_key(), expires, self.voice)
         description = {
-            "mode": self.mode, "expires": expires, "room": b64(self.room_id),
+            "mode": self.mode, "stun": self.mode == STUN, "expires": expires, "room": b64(self.room_id),
             "pub": b64(self.identity.public), "name": self.name,
             "group": self.group.document(), "voice": pending.voice,
         }
@@ -332,10 +387,10 @@ class Room:
                     self.server = await asyncio.start_server(self.accept_stream, "127.0.0.1", local_port)
                 description["address"] = advertised
             else:
+                description["screen"] = True
                 link = pending.link = self.new_webrtc(True)
                 async with asyncio.timeout(20):
-                    await link.pc.setLocalDescription(await link.pc.createOffer())
-                details = usable_sdp(link.pc.localDescription.sdp, self.mode)
+                    details = await self.local_sdp(link.pc, await link.pc.createOffer())
                 if advertised and self.mode == DIRECT:
                     description["sdp"] = usable_sdp(details, self.mode, advertised)
                 else:
@@ -376,11 +431,9 @@ class Room:
         key = bytearray(unb64(key_text, 32))
         writer = None
         try:
-            offer = open_document(b"invite", token, key)
+            offer = read_invitation(token, key)
             if offer["mode"] != self.mode:
                 raise ValueError("Выберите режим соединения, указанный хостом.")
-            if type(offer["expires"]) is not int or offer["expires"] < time.time():
-                raise ValueError("Срок действия приглашения истёк.")
             self.room_id = unb64(offer["room"], 16)
             remote, name = self.read_identity(offer)
             self.group = Group.read(offer["group"])
@@ -410,14 +463,17 @@ class Room:
                     await link.pc.setRemoteDescription(
                         RTCSessionDescription(usable_sdp(offer["sdp"], self.mode), "offer")
                     )
-                    await link.pc.setLocalDescription(await link.pc.createAnswer())
-                details = usable_sdp(link.pc.localDescription.sdp, self.mode)
+                    if offer.get("screen") is True:
+                        link.enable_screen()
+                        answer["screen"] = True
+                    details = await self.local_sdp(link.pc, await link.pc.createAnswer())
                 if self.mode == DIRECT and advertised:
                     self.show_addresses(details)
                     details = usable_sdp(details, self.mode, advertised)
                 answer["sdp"] = details
                 sealed = seal_document(b"answer", answer, key)
                 self.register(link, remote, name, key, token, sealed)
+                link.deadline = time.monotonic() + min(90, max(0, offer["expires"] - time.time()))
                 self.emit("answer", sealed)
         finally:
             wipe(key)
@@ -454,6 +510,8 @@ class Room:
         self.register(link, public, name, pending.key, pending.token, token)
         self.consume_invite()
         try:
+            if answer.get("screen") is True:
+                link.enable_screen()
             await link.pc.setRemoteDescription(RTCSessionDescription(sdp, "answer"))
         except BaseException:
             await self.drop(link)
@@ -523,6 +581,8 @@ class Room:
         self.show_roster()
 
     def show_roster(self):
+        self.prune_screen()
+        self.show_screen_access()
         self.emit("members", [
             (b64(public), name, public == self.identity.public,
              public in self.pairs and self.pairs[public].verified, self.locations.get(public))
@@ -589,7 +649,8 @@ class Room:
             elif packet[:1] == b"E" and link is self.relay and len(packet) <= 256:
                 self.emit("error", packet[1:].decode("utf-8"))
                 return
-        limit = VOICE_BYTES + ID_BYTES if channel == VOICE else MAX_PROFILE + 1
+        limit = {VOICE: VOICE_BYTES + ID_BYTES, VIDEO: ID_BYTES + VIDEO_HEADER.size + CHUNK,
+                 CONTROL: MAX_PROFILE + 1}[channel]
         if packet[:1] != PAYLOAD or not 89 < len(packet) <= 89 + limit:
             return
         sender, target = packet[1:33], packet[33:65]
@@ -597,7 +658,7 @@ class Room:
             return
         if self.host and sender != link.remote:
             return
-        if channel == VOICE and self.locations[sender] != self.locations[target]:
+        if channel in (VOICE, VIDEO) and self.locations[sender] != self.locations[target]:
             return
         if target == self.identity.public:
             peer = self.pairs[sender]
@@ -606,6 +667,9 @@ class Room:
                 if (peer.verified and len(data) == VOICE_BYTES + ID_BYTES
                         and data[:ID_BYTES].hex() == self.voice):
                     self.audio.incoming(sender, data[ID_BYTES:])
+            elif channel == VIDEO:
+                if peer.verified and data[:ID_BYTES].hex() == self.voice:
+                    self.receive_screen(sender, data[ID_BYTES:])
             else:
                 self.receive_control(sender, peer, data)
         elif self.host:
@@ -646,16 +710,102 @@ class Room:
             if self.group.find("text", channel):
                 self.emit_chat(sender, channel, body[ID_BYTES:].decode("utf-8"))
         elif kind == PROFILE and peer.verified and len(body) <= MAX_PROFILE:
-            self.profiles[sender] = Profile.read(json.loads(body))
+            self.profiles[sender] = Profile.read(json.loads(body)).public()
             self.emit("profile", (b64(sender), self.profiles[sender]))
+        elif kind in (SCREEN_START, SCREEN_STOP) and peer.verified and len(body) == STREAM_ID.size:
+            stream = STREAM_ID.unpack(body)[0]
+            receiver = self.screen_receivers.get(sender)
+            if kind == SCREEN_START and self.locations[sender] == self.voice:
+                if receiver is None or receiver.stream != stream:
+                    if receiver is not None:
+                        self.remove_screen(sender)
+                    self.screen_receivers[sender] = ScreenReceiver(stream, time.monotonic())
+            elif receiver is not None and receiver.stream == stream:
+                self.remove_screen(sender)
 
     def send_profile(self, public):
-        self.send_to(public, CONTROL, PROFILE + json_bytes(self.profile.document()))
+        self.send_to(public, CONTROL, PROFILE + json_bytes(self.profile.public().document()))
 
     def update_profile(self, profile):
         self.profile = profile
         self.profiles[self.identity.public] = profile
-        self.broadcast(CONTROL, PROFILE + json_bytes(profile.document()))
+        self.broadcast(CONTROL, PROFILE + json_bytes(profile.public().document()))
+
+    def screen_recipients(self):
+        local = self.identity.public
+        return {
+            public for public in self.members if public != local
+            and self.locations.get(public) == self.voice and self.pairs[public].verified
+            and (link := self.links.get(public) if self.host else self.relay) is not None
+            and link.screen_ready()
+        }
+
+    def show_screen_access(self):
+        self.emit("screen_access", bool(self.screen_recipients()))
+
+    def start_screen(self):
+        if not self.screen_recipients():
+            raise ValueError("Для демонстрации нужен проверенный собеседник с поддержкой WebRTC в голосовом канале.")
+        self.screen_stream += 1
+        self.screen_sequence = 0
+        self.screen_sharing = True
+
+    def stop_screen(self):
+        for public in self.screen_targets & self.members.keys():
+            self.send_to(public, CONTROL, SCREEN_STOP + STREAM_ID.pack(self.screen_stream))
+        self.screen_targets.clear()
+        self.screen_sharing = False
+
+    def send_screen(self, frame):
+        if not self.screen_sharing or self.closed:
+            return
+        targets = self.screen_recipients()
+        stream = STREAM_ID.pack(self.screen_stream)
+        for public in (self.screen_targets - targets) & self.members.keys():
+            self.send_to(public, CONTROL, SCREEN_STOP + stream)
+        for public in targets - self.screen_targets:
+            self.send_to(public, CONTROL, SCREEN_START + stream)
+        self.screen_targets = targets
+        channel = bytes.fromhex(self.voice)
+        for chunk in video_chunks(frame, self.screen_stream, self.screen_sequence):
+            for public in targets:
+                self.send_to(public, VIDEO, channel + chunk)
+        self.screen_sequence += 1
+
+    def receive_screen(self, sender, data):
+        receiver = self.screen_receivers.get(sender)
+        if receiver is not None:
+            frame = receiver.accept(data)
+            if frame is not None:
+                receiver.pending = frame
+                if receiver.task is None:
+                    receiver.task = self.spawn(self.decode_screen(sender, receiver))
+
+    async def decode_screen(self, sender, receiver):
+        try:
+            while receiver.pending is not None:
+                encoded, receiver.pending = receiver.pending, None
+                try:
+                    frame = await asyncio.to_thread(receiver.decode, encoded)
+                except FFmpegError:
+                    continue
+                if frame is not None and self.screen_receivers.get(sender) is receiver:
+                    receiver.last_frame = time.monotonic()
+                    receiver.visible = True
+                    self.emit("screen_frame", (b64(sender), *frame))
+        finally:
+            receiver.task = None
+
+    def remove_screen(self, public):
+        receiver = self.screen_receivers.pop(public)
+        if receiver.task is not None:
+            receiver.task.cancel()
+        self.emit("screen_ended", b64(public))
+
+    def prune_screen(self):
+        for public in list(self.screen_receivers):
+            if public not in self.members or self.locations.get(public) != self.voice:
+                self.remove_screen(public)
 
     def add_channel(self, kind, name):
         candidate = self.group.add(kind, name)
@@ -671,6 +821,9 @@ class Room:
             return
         self.locations[public] = channel
         if public == self.identity.public:
+            if self.screen_sharing:
+                self.stop_screen()
+                self.emit("screen_stopped", None)
             self.voice = channel
             self.audio.discard_capture()
             self.audio.reset_playback()
@@ -754,9 +907,18 @@ class Room:
             elif link.remote is not None:
                 self.emit("status", "Связь с участником не установлена.")
         elif link is self.relay:
-            self.emit("ended", "Связь с хостом завершена или не установлена.")
+            if was_member is None and self.mode == STUN:
+                message = "Связь не установлена. Проверьте, что хост принял ответ. При блокировке UDP или CGNAT попробуйте общий VPN."
+            else:
+                message = "Связь с хостом завершена или не установлена."
+            self.emit("ended", message)
 
     async def tick(self):
+        now = time.monotonic()
+        for public, receiver in list(self.screen_receivers.items()):
+            if receiver.visible and now - receiver.last_frame > 4:
+                receiver.visible = False
+                self.emit("screen_ended", b64(public))
         if self.pending is not None and self.pending.expires < time.time():
             await self.cancel_invite()
             self.emit("status", "Срок действия приглашения истёк.")
@@ -794,4 +956,6 @@ class Room:
         self.members.clear()
         self.locations.clear()
         self.profiles.clear()
+        self.screen_receivers.clear()
+        self.screen_targets.clear()
         self.profile = None

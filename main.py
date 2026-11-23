@@ -11,11 +11,13 @@ sys.dont_write_bytecode = True
 from cryptography.exceptions import InvalidTag
 from PyQt6.QtCore import QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication
+from av.error import FFmpegError
 
 from audio import Audio, DEVICES_ERRORS, devices
 from branding import APP_NAME, ASSETS
-from crypto import Identity, b64
+from crypto import Identity, b64, unb64
 from network import VOICE, Room
+from screen_media import FPS, LatestImage, ScreenEncoder, ScreenTrack
 from ui import Window
 
 
@@ -36,6 +38,18 @@ class SessionWorker(QThread):
         self.ending = None
         self.audio = None
         self.first_identity = None
+        self.screen_images = LatestImage()
+        self.screen_task = None
+        self.screen_frames = {}
+        self.screen_frames_lock = threading.Lock()
+
+    def screen_image(self, image):
+        if not self.stopping.is_set():
+            self.screen_images.put(image)
+
+    def take_screen_frame(self, public):
+        with self.screen_frames_lock:
+            return self.screen_frames.pop(public, None)
 
     def send(self, command, *args):
         if not self.stopping.is_set():
@@ -54,7 +68,18 @@ class SessionWorker(QThread):
     def room_event(self, kind, data):
         if kind == "ended":
             self.ending = data or ""
+        elif kind == "screen_frame":
+            public = data[0]
+            with self.screen_frames_lock:
+                pending = public in self.screen_frames
+                self.screen_frames[public] = data
+            if not pending:
+                self.emit("screen_ready", public)
         else:
+            if kind == "screen_ended":
+                self.take_screen_frame(data)
+            if kind == "screen_stopped" and self.screen_task is not None:
+                self.screen_task.cancel()
             if kind == "connected":
                 self.audio.session(self.room.identity.public)
             self.emit(kind, data)
@@ -103,8 +128,11 @@ class SessionWorker(QThread):
     async def end_room(self, status):
         await self.cancel_signal()
         if self.room is not None:
+            await self.stop_screen()
             await self.room.close()
             self.room = None
+            with self.screen_frames_lock:
+                self.screen_frames.clear()
             if not self.stopping.is_set():
                 self.audio.session(None)
                 self.emit("ended", status)
@@ -116,6 +144,10 @@ class SessionWorker(QThread):
             return
         if command == "device":
             self.audio.change_device(*args)
+            return
+        if command == "volume":
+            public, value = args
+            self.audio.peer_volume(unb64(public, 32), value)
             return
         if command in ("host", "join"):
             if self.room is not None:
@@ -136,6 +168,19 @@ class SessionWorker(QThread):
             return
         if command == "leave":
             await self.end_room("")
+        elif command == "screen_start":
+            await self.stop_screen()
+            fps, = args
+            try:
+                if fps not in FPS:
+                    raise ValueError("Частота кадров не поддерживается.")
+                self.room.start_screen()
+                self.screen_task = asyncio.create_task(self.share_screen(self.room, fps))
+                self.emit("screen_started", None)
+            except ValueError as error:
+                self.emit("screen_stopped", str(error))
+        elif command == "screen_stop":
+            await self.stop_screen()
         elif command == "cancel":
             await self.cancel_signal()
             await self.room.cancel_invite()
@@ -149,6 +194,28 @@ class SessionWorker(QThread):
                 "channel": self.room.add_channel,
             }
             handlers[command](*args)
+
+    async def share_screen(self, room, fps):
+        track, encoder = ScreenTrack(self.screen_images, fps), ScreenEncoder(fps)
+        try:
+            while room.screen_sharing:
+                frame = await track.recv()
+                data = await asyncio.to_thread(encoder.encode, frame)
+                if data is not None:
+                    room.send_screen(data)
+        except (FFmpegError, OSError, ValueError):
+            room.stop_screen()
+            self.emit("screen_stopped", "Не удалось закодировать демонстрацию экрана.")
+        finally:
+            track.stop()
+
+    async def stop_screen(self):
+        task, self.screen_task = self.screen_task, None
+        self.screen_images.take()
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self.room.stop_screen()
 
     def send_voice(self, payload):
         if self.room is not None:

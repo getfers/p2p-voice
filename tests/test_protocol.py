@@ -4,11 +4,16 @@ import asyncio
 import secrets
 import unittest
 from dataclasses import replace
+from fractions import Fraction
+from unittest.mock import patch
 
+import av
 from cryptography.exceptions import InvalidTag
 
 from crypto import Identity, b64, new_invite_key, open_document, seal_document
-from network import DIRECT, PROXY, VOICE, Room
+from ice import STUN_SERVERS
+from network import CONTROL, DIRECT, PROXY, STUN, VIDEO, VOICE, Room, read_invitation
+from screen_media import ScreenEncoder
 
 
 class CryptoTests(unittest.TestCase):
@@ -28,6 +33,10 @@ class CryptoTests(unittest.TestCase):
         self.assertEqual(receiver.decrypt(VOICE, packet1, b"header"), b"audio 1")
         with self.assertRaises(ValueError):
             receiver.decrypt(VOICE, packet1, b"header")
+        video = sender.encrypt(VIDEO, b"screen", b"header")
+        with self.assertRaises(InvalidTag):
+            receiver.decrypt(CONTROL, video, b"header")
+        self.assertEqual(receiver.decrypt(VIDEO, video, b"header"), b"screen")
 
     def test_token_requires_separate_key_and_type(self):
         key = new_invite_key()
@@ -110,9 +119,63 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: bool(first.audio.frames))
         self.assertEqual(first.audio.frames, [(second.identity.public, frame)])
         self.assertFalse(host.audio.frames)
+        await self.wait_for(lambda: first_events.get("screen_access") and second_events.get("screen_access"))
+        first.start_screen()
+        encoder = ScreenEncoder(15)
+        video_frame = av.VideoFrame(320, 180, "yuv420p")
+        for plane in video_frame.planes:
+            plane.update(bytes([128]) * plane.buffer_size)
+        video_frame.pts, video_frame.time_base = 0, Fraction(1, 15)
+        packet = encoder.encode(video_frame)
+        self.assertTrue(packet)
+        first.send_screen(packet)
+        await self.wait_for(lambda: first.identity.public in second.screen_receivers)
+        first.send_screen(packet)
+        await self.wait_for(lambda: "screen_frame" in second_events)
+        public, width, height, pixels = second_events["screen_frame"]
+        self.assertEqual((public, width, height, len(pixels)), (b64(first.identity.public), 320, 180, 320 * 180 * 3))
+        self.assertNotIn("screen_frame", host_events)
+        first.stop_screen()
+        await self.wait_for(lambda: second_events.get("screen_ended") == public)
         await self.pair(host, first)
         host.text("С хостом тоже работает")
         await self.wait_for(lambda: "chat" in first_events and first_events["chat"][1] == "Host")
+
+    async def test_stun_dual_gather_and_strict_never_contacts_stun(self):
+        from aioice import Candidate
+
+        endpoints = set()
+
+        async def reflexive(protocol, server):
+            endpoints.add(server)
+            host = protocol.local_candidate
+            return Candidate(f"stun-{server[0]}", host.component, "udp", 1, "192.0.2.10",
+                             41000 + STUN_SERVERS.index(server), "srflx", host.host, host.port), None
+
+        host, events = self.room(True, "Host", STUN)
+        guest, guest_events = self.room(False, "Guest", STUN)
+        direct, direct_events = self.room(True, "Strict", DIRECT)
+        with patch("ice.server_reflexive_candidate", reflexive):
+            await host.invite("", 17840)
+            token, key = events["invite"]
+            offer = read_invitation(token, host.pending.key)
+            self.assertIs(offer["stun"], True)
+            self.assertEqual(host.pending.link.pc.iceGatheringState, "complete")
+            self.assertEqual(endpoints, set(STUN_SERVERS))
+            self.assertIn("192.0.2.10 41000 typ srflx", offer["sdp"])
+            self.assertIn("192.0.2.10 41001 typ srflx", offer["sdp"])
+            endpoints.clear()
+            await guest.join(token, key, "", "")
+            self.assertEqual(endpoints, set(STUN_SERVERS))
+            self.assertEqual(guest.relay.pc.iceGatheringState, "complete")
+            reply = open_document(b"answer", guest_events["answer"], host.pending.key)
+            self.assertIn("192.0.2.10 41001 typ srflx", reply["sdp"])
+            endpoints.clear()
+            await direct.invite("", 17840)
+            strict = read_invitation(direct_events["invite"][0], direct.pending.key)
+            self.assertIs(strict["stun"], False)
+            self.assertNotIn("typ srflx", strict["sdp"])
+            self.assertFalse(endpoints)
 
     async def test_channel_and_profile_sync_with_separate_voice_channels(self):
         host, host_events = self.room(True, "Host", DIRECT)
@@ -129,8 +192,8 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
                          decoration="radar", effect="aura")
         guest.update_profile(custom)
         key = guest.identity.public
-        await self.wait_for(lambda: host.profiles.get(key) == custom)
-        self.assertEqual(host_events["profile"], (b64(key), custom))
+        await self.wait_for(lambda: key in host.profiles and host.profiles[key].name == custom.name)
+        self.assertEqual(host_events["profile"], (b64(key), custom.public()))
         studio = guest.group.voice[-1].key
         guest.move(studio)
         await self.wait_for(lambda: host.locations[key] == studio)

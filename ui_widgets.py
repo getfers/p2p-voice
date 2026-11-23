@@ -9,10 +9,10 @@ from PyQt6.QtCore import (
     QRectF, QSize, Qt, pyqtProperty,
 )
 from PyQt6.QtGui import (
-    QColor, QFont, QIcon, QImageReader, QLinearGradient, QPainter, QPainterPath,
+    QColor, QFont, QIcon, QImageReader, QLinearGradient, QMovie, QPainter, QPainterPath,
     QPen, QPixmap,
 )
-from PyQt6.QtWidgets import QFrame, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from branding import APP_NAME, HEADER_LOGO
 from models import STATUS
@@ -69,6 +69,79 @@ class BrandLogo(QLabel):
         painter.fillRect(image.rect(), QColor(active_palette()["text"]))
         painter.end()
         self.setPixmap(image)
+
+
+class PillSwitch(QCheckBox):
+    def __init__(self, name, checked=False):
+        super().__init__()
+        self.setAccessibleName(name)
+        self.setToolTip(name)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(54, 31)
+        self.position = float(checked)
+        self.setChecked(checked)
+        self.animation = QPropertyAnimation(self, b"thumb", self)
+        self.animation.setDuration(165)
+        self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.toggled.connect(self.slide)
+
+    @pyqtProperty(float)
+    def thumb(self):
+        return self.position
+
+    @thumb.setter
+    def thumb(self, value):
+        self.position = value
+        self.update()
+
+    def slide(self, enabled):
+        self.animation.stop()
+        self.animation.setStartValue(self.position)
+        self.animation.setEndValue(float(enabled))
+        self.animation.start()
+
+    def hitButton(self, point):
+        return self.rect().contains(point)
+
+    def paintEvent(self, _event):
+        colors = active_palette()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if not self.isEnabled():
+            painter.setOpacity(.56)
+        track = QRectF(1, 2, 52, 27)
+        shade = QColor(colors["selected"])
+        active = QColor(colors["primary"])
+        t = self.position
+        shade = QColor(*[round(a + (b - a) * t) for a, b in zip(shade.getRgb()[:3], active.getRgb()[:3])])
+        gradient = QLinearGradient(0, 3, 0, 30)
+        gradient.setColorAt(0, shade.darker(112))
+        gradient.setColorAt(1, shade)
+        painter.setPen(QPen(QColor(colors["focus"] if self.hasFocus() else colors["stroke"]), 1))
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(track, 13.5, 13.5)
+        x = 5 + t * 25
+        painter.setPen(Qt.PenStyle.NoPen)
+        shadow = QColor(0, 0, 0, 33)
+        painter.setBrush(shadow)
+        painter.drawEllipse(QRectF(x + .5, 6.5, 22, 22))
+        painter.setBrush(QColor("#ffffff" if t < .5 else colors["on_primary"]))
+        painter.drawEllipse(QRectF(x, 5, 21, 21))
+
+
+def switch_row(layout, text, checked, callback, *, detail=""):
+    row = QHBoxLayout()
+    copy = QVBoxLayout()
+    copy.setSpacing(2)
+    copy.addWidget(label(text, "subheading", True))
+    if detail:
+        copy.addWidget(label(detail, "muted", True))
+    row.addLayout(copy, 1)
+    switch = PillSwitch(text, checked)
+    switch.toggled.connect(callback)
+    row.addWidget(switch, alignment=Qt.AlignmentFlag.AlignVCenter)
+    layout.addLayout(row)
+    return switch
 
 
 class AnimatedButton(QPushButton):
@@ -252,6 +325,9 @@ PATHS = {
     "minimize": [[(6, 12), (18, 12)]],
     "maximize": [],
     "restore": [[(8, 7), (8, 4), (20, 4), (20, 16), (17, 16)]],
+    "screen": [[(8, 21), (16, 21)], [(12, 17), (12, 21)]],
+    "fullscreen": [[(4, 9), (4, 4), (9, 4)], [(15, 4), (20, 4), (20, 9)],
+                   [(20, 15), (20, 20), (15, 20)], [(9, 20), (4, 20), (4, 15)]],
 }
 
 
@@ -276,6 +352,7 @@ def icon(name, color=None):
         "radio": [(4, 7, 16, 12, 3)], "robot": [(4, 7, 16, 12, 3)], "mask": [(4, 7, 16, 12, 3)],
         "panel-left": [(3, 4, 18, 16, 2)], "panel-right": [(3, 4, 18, 16, 2)],
         "maximize": [(5, 5, 14, 14, 1)], "restore": [(4, 8, 12, 12, 1)],
+        "screen": [(3, 4, 18, 13, 2)],
     }
     for x, y, w, h, radius in boxes.get(name, ()):
         painter.drawRoundedRect(QRectF(x, y, w, h), radius, radius)
@@ -351,10 +428,36 @@ class Avatar(EffectWidget):
 
 
 class Banner(EffectWidget):
-    def __init__(self, profile, height):
-        super().__init__(profile.effect != "none")
+    def __init__(self, profile, height, gif=b""):
+        super().__init__(profile.effect != "none" and not gif)
         self.profile = profile
         self.setFixedHeight(height)
+        self.movie = None
+        if gif:
+            self.gif_data = QByteArray(gif)
+            self.gif_buffer = QBuffer(self.gif_data, self)
+            self.gif_buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+            self.movie = QMovie(self.gif_buffer, QByteArray(b"gif"), self)
+            self.movie.frameChanged.connect(lambda _frame: self.update())
+            self.movie.finished.connect(self.restart_movie)
+
+    def restart_movie(self):
+        if self.isVisible():
+            self.movie.jumpToFrame(0)
+            self.movie.start()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.movie is not None:
+            if self.movie.state() == QMovie.MovieState.Paused:
+                self.movie.setPaused(False)
+            else:
+                self.movie.start()
+
+    def hideEvent(self, event):
+        if self.movie is not None:
+            self.movie.setPaused(True)
+        super().hideEvent(event)
 
     def paintEvent(self, _event):
         canvas = QPainter(self)
@@ -367,6 +470,13 @@ class Banner(EffectWidget):
         gradient.setColorAt(0, QColor(self.profile.banner_first))
         gradient.setColorAt(1, QColor(self.profile.banner_last))
         canvas.fillRect(self.rect(), gradient)
+        pixmap = self.movie.currentPixmap() if self.movie is not None else None
+        if pixmap is not None and not pixmap.isNull():
+            size = pixmap.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding)
+            target = QRectF((width - size.width()) / 2, (height - size.height()) / 2, size.width(), size.height())
+            canvas.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            canvas.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
+            return
         accent = QColor(self.profile.accent).lighter(155)
         accent.setAlpha(95)
         canvas.setPen(Qt.PenStyle.NoPen)
@@ -389,12 +499,12 @@ class Banner(EffectWidget):
 
 
 class ProfileHeader(QWidget):
-    def __init__(self, profile, *, own=False, edit=None, on_select=None):
+    def __init__(self, profile, *, own=False, edit=None, on_select=None, gif=b""):
         super().__init__()
         self.banner_h = 40 if own else 76
         self.side = 37 if own else 52
         self.setFixedHeight(self.banner_h + (40 if own else 47))
-        self.banner = Banner(profile, self.banner_h)
+        self.banner = Banner(profile, self.banner_h, gif)
         self.banner.setParent(self)
         self.avatar = Avatar(self.side, profile, show_status=True)
         self.avatar.setParent(self)

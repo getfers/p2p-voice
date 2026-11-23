@@ -118,8 +118,11 @@ class PacketCipher:
         outgoing, incoming = (0, 64) if low_side else (64, 0)
         self.send = [ChaCha20Poly1305(keys[outgoing + i:outgoing + i + 32]) for i in (0, 32)]
         self.receive = [ChaCha20Poly1305(keys[incoming + i:incoming + i + 32]) for i in (0, 32)]
-        self.counters = [0, 0]
-        self.windows = [ReceiveWindow(), ReceiveWindow()]
+        video = derive(secret, salt, purpose + b"/screen", 64)
+        self.send.append(ChaCha20Poly1305(video[outgoing // 2:outgoing // 2 + 32]))
+        self.receive.append(ChaCha20Poly1305(video[incoming // 2:incoming // 2 + 32]))
+        self.counters = [0, 0, 0]
+        self.windows = [ReceiveWindow(), ReceiveWindow(), ReceiveWindow()]
 
     def encrypt(self, channel, payload, header=b""):
         number = struct.pack("!Q", self.counters[channel])

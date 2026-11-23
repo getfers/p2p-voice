@@ -181,6 +181,7 @@ class Audio:
         self.output_queue = deque()
         self.monitor_queue = deque()
         self.inbound = {}
+        self.volumes = {}
         self.activity = {}
         self.playing = set()
         self.muted = True
@@ -201,6 +202,7 @@ class Audio:
     def session(self, local):
         self.discard_capture()
         self.reset_playback()
+        self.volumes.clear()
         self.local = local
         self.muted = True
         self.pressed = False
@@ -405,7 +407,11 @@ class Audio:
             if not queue:
                 self.playing.discard(public)
             if public in self.playing:
-                frames.append(queue.popleft())
+                frame = queue.popleft()
+                gain = self.volumes.get(public, 100)
+                if gain != 100:
+                    np.copyto(frame, frame.astype(np.int32) * gain // 100, casting="unsafe")
+                frames.append(frame)
         if frames and self.output_stream is not None and len(self.output_queue) < 3:
             mixed = np.clip(np.sum(frames, axis=0, dtype=np.int32), -32768, 32767)
             output = self.output_resampler.convert(mixed)
@@ -416,6 +422,10 @@ class Audio:
             output.fill(0)
         for frame in frames:
             frame.fill(0)
+
+    def peer_volume(self, public, value):
+        if isinstance(public, bytes) and 0 <= value <= 100:
+            self.volumes[public] = value
 
     def tick(self):
         now = time.monotonic()

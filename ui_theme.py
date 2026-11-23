@@ -1,5 +1,6 @@
 """Светлая и тёмная палитры используют одни и те же правила компоновки."""
 
+from re import sub
 from string import Template
 
 from PyQt6.QtGui import QColor, QPalette
@@ -27,7 +28,7 @@ PALETTES = {
 
 RULES = Template("""
 QWidget { color: $text; font-family: "Segoe UI"; font-size: 13px; }
-QMainWindow, QDialog, QWidget#workspace { background: $surface; }
+QMainWindow, QDialog, QWidget#workspace, QWidget#settingsPage { background: $surface; }
 QWidget#titlebar { background: $surface; border-bottom: 1px solid $stroke; }
 QWidget#groupRail, QWidget#navigation, QWidget#inspector { background: $side; }
 QWidget#groupRail { border-right: 1px solid $stroke; }
@@ -67,6 +68,7 @@ QPushButton[role="flat"]:disabled { color: $disabled; }
 QPushButton#microphone:checked, QPushButton#microphoneCheck:checked, QPushButton#microphoneMonitor:checked {
   background: $secure_bg; border: 1px solid $green; color: $secure;
 }
+QPushButton#screenShare[sharing="true"] { background: $primary; color: $on_primary; border-color: $primary; }
 QPushButton[role="round"] {
   background: $card; border: 1px solid $stroke; border-radius: 13px;
   min-height: 0; padding: 0; font-size: 17px; font-weight: 600;
@@ -78,6 +80,8 @@ QPushButton[role="member"][speaking="true"] { border: 1px solid $green; backgrou
 QPushButton[role="presence"] { min-height: 26px; padding: 0; background: transparent; border: 1px solid transparent; }
 QPushButton[role="presence"][speaking="true"] { border-color: $green; background: $secure_bg; }
 QLineEdit, QComboBox, QSpinBox { min-height: 28px; padding: 2px 9px; }
+QComboBox { padding-right: 26px; }
+QComboBox::drop-down { border: none; width: 23px; subcontrol-origin: padding; subcontrol-position: top right; }
 QComboBox QAbstractItemView, QMenu {
   background: $field; border: 1px solid $stroke; selection-background-color: $selected;
 }
@@ -103,7 +107,7 @@ def active_palette():
     return PALETTES.get(name, PALETTES["light"])
 
 
-def apply_palette(name, widget):
+def apply_palette(name, widget, scale=100):
     app = QApplication.instance()
     app.setProperty("sekretTheme", name)
     colors = PALETTES[name]
@@ -120,4 +124,9 @@ def apply_palette(name, widget):
     for role in (QPalette.ColorRole.Text, QPalette.ColorRole.WindowText, QPalette.ColorRole.ButtonText):
         palette.setColor(QPalette.ColorGroup.Disabled, role, QColor(colors["disabled"]))
     app.setPalette(palette)
-    widget.setStyleSheet(RULES.substitute(colors))
+    rules = RULES.substitute(colors)
+    if scale != 100:
+        rules = sub(r"(font-size|min-height): (\d+)px", lambda m: (
+            f"{m[1]}: {round(int(m[2]) * scale / 100)}px" if int(m[2]) >= 10 else m[0]
+        ), rules)
+    widget.setStyleSheet(rules)

@@ -70,6 +70,9 @@ class Profile:
             data["effect"] = self.effect
         return data
 
+    def public(self):
+        return replace(self, decoration="none", effect="none")
+
     @classmethod
     def read(cls, value):
         if not isinstance(value, dict):
